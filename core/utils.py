@@ -6,6 +6,12 @@ import shutil
 from datetime import datetime
 
 DEFAULT_BITRATE = "192"
+JS_RUNTIME_COMMANDS = {
+    "deno": "deno",
+    "node": "node",
+    "bun": "bun",
+    "quickjs": "qjs",
+}
 
 def human_time():
     return datetime.now().strftime("%H:%M:%S")
@@ -63,3 +69,26 @@ def is_likely_playlist_url(url: str) -> bool:
         return False
     u = url.lower()
     return ("list=" in u) or ("/playlist" in u) or ("music.youtube.com/playlist" in u)
+
+def available_js_runtimes():
+    """Return yt-dlp JavaScript runtimes available on PATH.
+
+    Recent yt-dlp versions can use JavaScript runtimes for some YouTube
+    extraction paths. Only Deno is enabled by default in yt-dlp, so explicitly
+    passing the installed runtimes lets users benefit from Node/Bun/QuickJS too.
+    """
+
+    runtimes = {}
+    for name, executable in JS_RUNTIME_COMMANDS.items():
+        path = shutil.which(executable)
+        if path:
+            runtimes[name] = {"path": path}
+    return runtimes
+
+def js_runtime_warning_message() -> str:
+    return (
+        "No supported JavaScript runtime was found on PATH. Downloads may still "
+        "work, but YouTube extraction is less reliable with current yt-dlp. "
+        "Install Deno 2.3+, Node.js 22+, Bun 1.2.11+, or QuickJS, then restart "
+        "the app."
+    )

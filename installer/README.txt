@@ -7,12 +7,15 @@ that automate the installation process on both Windows and Unix-like systems.
 Building the installer
 ----------------------
 1. Ensure you have Python 3.8 or newer available.
-2. (Windows only) Install PyInstaller so the standalone executable can be
+2. Recommended for current yt-dlp YouTube reliability: install one supported
+   JavaScript runtime on PATH, such as Deno 2.3+, Node.js 22+, Bun 1.2.11+,
+   or QuickJS.
+3. (Windows only) Install PyInstaller so the standalone executable can be
    produced:
        pip install pyinstaller
-3. From the project root, run:
+4. From the project root, run:
        python installer/build.py
-4. The archive "dist/youtube_downloader_installer.zip" will be created. On
+5. The archive "dist/youtube_downloader_installer.zip" will be created. On
    Windows this build step also bundles a `youtube-downloader.exe` inside the
    `app/` directory of the archive.
 

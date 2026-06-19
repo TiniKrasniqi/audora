@@ -8,7 +8,7 @@ A polished desktop app for turning YouTube links into high-quality audio or vide
 - **Video mode** – Switch to MP4 downloads and choose the resolution that fits your storage or screen (480p up to 4K).
 - **Smart file organization** – Playlists get their own folders and tidy filenames so your library stays orderly.
 - **Real-time progress** – Modern CustomTkinter UI shows per-item progress, ETA, speed, and detailed logs.
-- **Download history browser** – Quickly revisit finished tracks, preview thumbnails, and launch files right from the app.
+- **Download history player** – Revisit finished tracks, preview thumbnails, and play audio/video inside Audora.
 - **One-click stop & resume** – Toggle between Start/Stop to cancel in-flight downloads gracefully.
 
 ## 🖥️ Tech highlights
@@ -21,6 +21,9 @@ A polished desktop app for turning YouTube links into high-quality audio or vide
 1. **Prerequisites**
    - Python 3.9 or newer.
    - FFmpeg available on your system `PATH`.
+   - Recommended for current yt-dlp YouTube reliability: one supported
+     JavaScript runtime on `PATH`, such as Deno 2.3+, Node.js 22+, Bun 1.2.11+,
+     or QuickJS.
    - A working Tk installation (included with most Python distributions on Windows/macOS; install `python3-tk` on many Linux distros).
 2. **Clone the project**
    ```bash

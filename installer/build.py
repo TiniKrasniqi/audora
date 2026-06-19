@@ -81,6 +81,8 @@ def build_windows_executable(destination: Path) -> None:
             "--windowed",
             "--name",
             EXECUTABLE_STEM,
+            "--hidden-import",
+            "vlc",
             str(ROOT / "main.py"),
             "--distpath",
             str(dist_path),

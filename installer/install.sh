@@ -33,6 +33,25 @@ if [[ -z "$PYTHON_CMD" ]]; then
     fi
 fi
 
+install_vlc_runtime() {
+    if command -v vlc >/dev/null 2>&1; then
+        return
+    fi
+
+    echo "Installing VLC playback runtime..."
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y vlc
+    elif command -v brew >/dev/null 2>&1; then
+        brew install --cask vlc || brew install vlc
+    else
+        cat >&2 <<'VLC_WARNING'
+Warning: VLC/libVLC was not found and could not be installed automatically.
+Install VLC with your system package manager before using the in-app player.
+VLC_WARNING
+    fi
+}
+
 if [[ ! -d "$VENV_DIR" ]]; then
     echo "Creating virtual environment..."
     "$PYTHON_CMD" -m venv "$VENV_DIR"
@@ -43,6 +62,19 @@ source "$VENV_DIR/bin/activate"
 
 python -m pip install --upgrade pip
 python -m pip install -r "$APP_DIR/requirements.txt"
+
+install_vlc_runtime
+
+if ! command -v deno >/dev/null 2>&1 \
+    && ! command -v node >/dev/null 2>&1 \
+    && ! command -v bun >/dev/null 2>&1 \
+    && ! command -v qjs >/dev/null 2>&1; then
+    cat >&2 <<'RUNTIME_WARNING'
+Warning: no JavaScript runtime was found on PATH.
+The app can still run, but current yt-dlp works best for YouTube when Deno 2.3+,
+Node.js 22+, Bun 1.2.11+, or QuickJS is installed.
+RUNTIME_WARNING
+fi
 
 deactivate
 

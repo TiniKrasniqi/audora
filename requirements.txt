@@ -2,3 +2,4 @@ customtkinter>=5.2.0
 Pillow>=10.0.0
 PyInstaller>=6.3.0
 yt-dlp
+python-vlc>=3.0.21203

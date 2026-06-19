@@ -1,8 +1,8 @@
-# 🎧 YouTube → MP3 Downloader
+# 🎧 Audora
 
-A polished desktop app for turning YouTube links into high-quality audio or video files with just a couple of clicks. Built with love (and a little help from Codex in ChatGPT) to make collecting playlists and tracks painless.
+Audora is a polished desktop app for turning YouTube links into high-quality audio or video files with just a couple of clicks. Built with love (and a little help from Codex in ChatGPT) to make collecting playlists and tracks painless.
 
-## ✨ What the app delivers
+## ✨ What Audora delivers
 - **Streamlined downloads** – Paste any YouTube URL and press start. The app handles single videos or full playlists automatically.
 - **Audio-first workflow** – Converts to MP3 with embeddable thumbnails, metadata, and selectable bitrates (128–320 kbps) powered by FFmpeg + yt-dlp.
 - **Video mode** – Switch to MP4 downloads and choose the resolution that fits your storage or screen (480p up to 4K).
@@ -63,8 +63,8 @@ application source alongside two installer entry points:
   (using `apt` or Homebrew when available), provisions a virtual environment,
   and installs the required packages.
 
-After either installer completes, launch the application with the generated
+After either installer completes, launch Audora with the generated
 `run_app` helper script (`run_app.ps1` on Windows or `run_app.sh` on
 Linux/macOS).
 
-Happy downloading! 🎵
+Happy listening! 🎵

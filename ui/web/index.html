@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Audora</title>
+    <link rel="preconnect" href="https://unpkg.com" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-frame">
+      <aside class="sidebar">
+        <button class="brand" data-page="overview" aria-label="Audora overview">
+          <img src="assets/logo-audora.png" alt="Audora" />
+        </button>
+        <nav class="nav" id="mainNav"></nav>
+        <div class="storage-card">
+          <div class="storage-icon"><i class="ph ph-database"></i></div>
+          <div>
+            <div class="small-title">Storage Used</div>
+            <div class="muted">Loading storage...</div>
+          </div>
+          <div class="meter"><span style="width: 0%"></span></div>
+          <strong>0%</strong>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <label class="search-pill">
+            <i class="ph ph-magnifying-glass"></i>
+            <input id="globalSearch" type="search" placeholder="Search tracks, artists, albums..." />
+            <kbd>⌘ K</kbd>
+          </label>
+          <div class="topbar-actions">
+            <button class="status-pill" data-action="open-devices">
+              <span class="online-dot"></span>
+              <span id="syncStatusText">Local sync online</span>
+              <i class="ph ph-caret-down"></i>
+            </button>
+            <button class="profile-pill">
+              <img src="assets/avatar-alex.png" alt="" />
+              <span>Alex Morgan</span>
+              <i class="ph ph-caret-down"></i>
+            </button>
+          </div>
+        </header>
+
+        <section id="pageRoot" class="page-root" aria-live="polite"></section>
+      </main>
+
+      <footer class="mini-player">
+        <div class="now-playing">
+          <img id="miniArt" src="assets/album-moment-apart.png" alt="" />
+          <div>
+            <strong id="miniTitle">Nothing playing</strong>
+            <span id="miniArtist">No media selected</span>
+          </div>
+          <button class="icon-button" title="Favorite"><i class="ph ph-heart"></i></button>
+        </div>
+        <div class="player-center">
+          <div class="player-controls">
+            <button class="icon-button" title="Shuffle"><i class="ph ph-shuffle"></i></button>
+            <button class="icon-button" title="Previous"><i class="ph-fill ph-skip-back"></i></button>
+            <button class="play-main" id="miniPlay" title="Play or pause"><i class="ph-fill ph-pause"></i></button>
+            <button class="icon-button" title="Next"><i class="ph-fill ph-skip-forward"></i></button>
+            <button class="icon-button" title="Repeat"><i class="ph ph-repeat"></i></button>
+          </div>
+          <div class="player-progress">
+            <span id="playerElapsed">0:00</span>
+            <input id="playerSeek" type="range" min="0" max="1000" value="0" disabled />
+            <span id="playerDuration">0:00</span>
+          </div>
+        </div>
+        <div class="volume-cluster">
+          <i class="ph ph-speaker-high"></i>
+          <input type="range" min="0" max="100" value="37" />
+          <button class="icon-button" title="Queue"><i class="ph ph-list-bullets"></i></button>
+        </div>
+      </footer>
+    </div>
+
+    <div id="videoPlayerPanel" class="video-player-panel" hidden>
+      <div class="video-player-head">
+        <strong id="videoPlayerTitle">Now playing</strong>
+        <button class="icon-button" data-action="close-video-player" title="Close video">
+          <i class="ph ph-x"></i>
+        </button>
+      </div>
+      <video id="mediaPlayer" preload="metadata" playsinline controls></video>
+    </div>
+    <div id="toastHost" class="toast-host" aria-live="assertive"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

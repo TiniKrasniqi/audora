@@ -11,6 +11,7 @@ import queue
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, List
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import customtkinter as ctk
@@ -22,32 +23,48 @@ from core.utils import ensure_ffmpeg_or_die, default_download_dir, human_time, D
 from core.downloader import DownloadProgress
 from core.queue import DownloadManager
 from core.media import MediaInfo, format_media_time, import_vlc_binding, probe_media, vlc_runtime_status
+from core.sync import AudoraSyncServer, DEFAULT_SYNC_PORT
 
 
-# Color theme
+# Audora design tokens
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
-ACCENT = "#ececec"
-ACCENT_HOVER = "#f4f4f4"
-ACCENT_TEXT = "#0d0d0d"
-BG = "#212121"
-SURFACE = "#2f2f2f"
-SURFACE_ALT = "#303030"
-SURFACE_HOVER = "#3a3a3a"
-BORDER = "#4a4a4a"
-ROW_BG = "#2b2b2b"
-ROW_ACTIVE_BG = "#3a3a3a"
-ROW_ERROR_BG = "#3a2729"
-THUMB_BG = "#3a3a3a"
-TEXT = "#ececec"
-TEXT_SOFT = "#d6d6d6"
-MUTED = "#b4b4b4"
-MUTED_DARK = "#8f8f8f"
-DANGER = "#e25555"
-DANGER_HOVER = "#ef6666"
-WARNING = "#f0b45d"
-WARNING_HOVER = "#f4c278"
+BG_MAIN = "#05060a"
+BG = "#080a10"
+BG_SIDEBAR = "#090b11"
+SURFACE = "#11141d"
+SURFACE_ALT = "#151925"
+SURFACE_HOVER = "#1a1e2b"
+BORDER = "#2a2f3a"
+BORDER_MEDIUM = "#353b4a"
+BORDER_PINK = "#7a2458"
+ROW_BG = "#11141d"
+ROW_ACTIVE_BG = "#241528"
+ROW_ERROR_BG = "#2a151b"
+THUMB_BG = "#1a1e2b"
+TEXT = "#f8fafc"
+TEXT_SOFT = "#d4d4dc"
+MUTED = "#a1a1aa"
+MUTED_DARK = "#71717a"
+ACCENT = "#ec4899"
+ACCENT_HOVER = "#f43f5e"
+ACCENT_TEXT = "#ffffff"
+ACCENT_MAGENTA = "#c026d3"
+ACCENT_PURPLE = "#8b5cf6"
+SUCCESS = "#22c55e"
+DANGER = "#ef4444"
+DANGER_HOVER = "#fb7185"
+WARNING = "#f59e0b"
+WARNING_HOVER = "#fbbf24"
+FONT_FAMILY = "Segoe UI"
+SIDEBAR_WIDTH = 264
+TOPBAR_HEIGHT = 86
+MINI_PLAYER_HEIGHT = 92
+RADIUS_SM = 10
+RADIUS_MD = 14
+RADIUS_LG = 20
+RADIUS_XL = 26
 LOADER_SPEED = 0.32
 HISTORY_RENDER_BATCH_SIZE = 10
 DELETED_HOLD_MS = 3000
@@ -71,6 +88,10 @@ except AttributeError:  # Pillow < 9 fallback
     _RESAMPLE = Image.LANCZOS
 
 
+def ui_font(size: int, weight: Optional[str] = None):
+    return (FONT_FAMILY, size, weight) if weight else (FONT_FAMILY, size)
+
+
 def _make_line_icon(kind: str, color: str = TEXT, size: int = 20) -> ctk.CTkImage:
     scale = 4
     canvas_size = size * scale
@@ -82,7 +103,91 @@ def _make_line_icon(kind: str, color: str = TEXT, size: int = 20) -> ctk.CTkImag
     def p(value: float) -> int:
         return int(round(value * scale))
 
-    if kind == "history":
+    if kind == "home":
+        draw.line(
+            [(p(3.5), p(9.5)), (p(10), p(4.0)), (p(16.5), p(9.5))],
+            fill=icon_color,
+            width=stroke,
+            joint="curve",
+        )
+        draw.rounded_rectangle([p(5.2), p(8.8), p(14.8), p(16.2)], radius=p(1.2), outline=icon_color, width=stroke)
+        draw.line([(p(8.6), p(16.2)), (p(8.6), p(12.0)), (p(11.4), p(12.0)), (p(11.4), p(16.2))], fill=icon_color, width=stroke)
+    elif kind in ("library", "music"):
+        draw.line([(p(7.0), p(5.2)), (p(14.0), p(3.8)), (p(14.0), p(12.2))], fill=icon_color, width=stroke)
+        draw.line([(p(7.0), p(5.2)), (p(7.0), p(14.0))], fill=icon_color, width=stroke)
+        draw.ellipse([p(3.7), p(12.7), p(7.1), p(16.1)], outline=icon_color, width=stroke)
+        draw.ellipse([p(10.7), p(10.9), p(14.1), p(14.3)], outline=icon_color, width=stroke)
+    elif kind == "download":
+        draw.line([(p(10), p(4.0)), (p(10), p(12.2))], fill=icon_color, width=stroke)
+        draw.line([(p(6.4), p(9.0)), (p(10), p(12.6)), (p(13.6), p(9.0))], fill=icon_color, width=stroke, joint="curve")
+        draw.line([(p(4.2), p(15.6)), (p(15.8), p(15.6))], fill=icon_color, width=stroke)
+    elif kind == "devices":
+        draw.rounded_rectangle([p(3.8), p(5.0), p(16.2), p(13.6)], radius=p(1.2), outline=icon_color, width=stroke)
+        draw.line([(p(8.0), p(16.0)), (p(12.0), p(16.0))], fill=icon_color, width=stroke)
+        draw.line([(p(10), p(13.6)), (p(10), p(16.0))], fill=icon_color, width=stroke)
+    elif kind == "search":
+        draw.ellipse([p(4.0), p(4.0), p(12.5), p(12.5)], outline=icon_color, width=stroke)
+        draw.line([(p(11.0), p(11.0)), (p(16.0), p(16.0))], fill=icon_color, width=stroke)
+    elif kind == "folder":
+        draw.rounded_rectangle([p(3.2), p(6.5), p(16.8), p(15.8)], radius=p(1.4), outline=icon_color, width=stroke)
+        draw.line([(p(3.8), p(7.3)), (p(7.6), p(7.3)), (p(8.8), p(5.2)), (p(13.4), p(5.2))], fill=icon_color, width=stroke)
+    elif kind == "heart":
+        points = [
+            (p(10), p(15.8)),
+            (p(4.6), p(10.8)),
+            (p(3.8), p(7.4)),
+            (p(5.4), p(5.2)),
+            (p(8.0), p(5.8)),
+            (p(10), p(8.0)),
+            (p(12.0), p(5.8)),
+            (p(14.6), p(5.2)),
+            (p(16.2), p(7.4)),
+            (p(15.4), p(10.8)),
+        ]
+        draw.line(points + [points[0]], fill=icon_color, width=stroke, joint="curve")
+    elif kind == "shuffle":
+        draw.line([(p(4.0), p(6.0)), (p(7.0), p(6.0)), (p(12.5), p(13.8)), (p(16.0), p(13.8))], fill=icon_color, width=stroke)
+        draw.line([(p(4.0), p(14.0)), (p(7.2), p(14.0)), (p(9.0), p(11.5))], fill=icon_color, width=stroke)
+        draw.line([(p(13.8), p(11.6)), (p(16.0), p(13.8)), (p(13.8), p(16.0))], fill=icon_color, width=stroke)
+        draw.line([(p(13.8), p(3.8)), (p(16.0), p(6.0)), (p(13.8), p(8.2))], fill=icon_color, width=stroke)
+    elif kind == "previous":
+        draw.polygon([(p(6.5), p(10)), (p(13.8), p(4.8)), (p(13.8), p(15.2))], fill=icon_color)
+        draw.rounded_rectangle([p(4.4), p(4.8), p(5.7), p(15.2)], radius=p(0.5), fill=icon_color)
+    elif kind == "next":
+        draw.polygon([(p(13.5), p(10)), (p(6.2), p(4.8)), (p(6.2), p(15.2))], fill=icon_color)
+        draw.rounded_rectangle([p(14.3), p(4.8), p(15.6), p(15.2)], radius=p(0.5), fill=icon_color)
+    elif kind == "repeat":
+        draw.arc([p(4.0), p(4.6), p(15.4), p(13.8)], start=200, end=352, fill=icon_color, width=stroke)
+        draw.arc([p(4.6), p(6.2), p(16.0), p(15.4)], start=22, end=174, fill=icon_color, width=stroke)
+        draw.polygon([(p(14.1), p(5.0)), (p(17.0), p(6.5)), (p(14.6), p(8.7))], fill=icon_color)
+        draw.polygon([(p(5.9), p(15.0)), (p(3.0), p(13.5)), (p(5.4), p(11.3))], fill=icon_color)
+    elif kind == "queue":
+        for y in (5.5, 10.0, 14.5):
+            draw.line([(p(7.4), p(y)), (p(16.0), p(y))], fill=icon_color, width=stroke)
+            draw.ellipse([p(4.2), p(y - 0.65), p(5.5), p(y + 0.65)], fill=icon_color)
+    elif kind == "video":
+        draw.rounded_rectangle([p(3.6), p(6.0), p(12.4), p(14.0)], radius=p(1.1), outline=icon_color, width=stroke)
+        draw.polygon([(p(12.4), p(8.2)), (p(16.4), p(6.2)), (p(16.4), p(13.8)), (p(12.4), p(11.8))], outline=icon_color)
+        draw.line([(p(12.4), p(8.2)), (p(16.4), p(6.2)), (p(16.4), p(13.8)), (p(12.4), p(11.8))], fill=icon_color, width=stroke)
+    elif kind == "link":
+        draw.arc([p(3.8), p(7.0), p(10.5), p(14.0)], start=112, end=412, fill=icon_color, width=stroke)
+        draw.arc([p(9.5), p(6.0), p(16.2), p(13.0)], start=-68, end=232, fill=icon_color, width=stroke)
+        draw.line([(p(7.5), p(12.0)), (p(12.5), p(8.0))], fill=icon_color, width=stroke)
+    elif kind == "database":
+        draw.ellipse([p(4.0), p(4.0), p(16.0), p(8.8)], outline=icon_color, width=stroke)
+        draw.line([(p(4.0), p(6.4)), (p(4.0), p(14.0))], fill=icon_color, width=stroke)
+        draw.line([(p(16.0), p(6.4)), (p(16.0), p(14.0))], fill=icon_color, width=stroke)
+        draw.arc([p(4.0), p(11.6), p(16.0), p(16.4)], start=0, end=180, fill=icon_color, width=stroke)
+        draw.arc([p(4.0), p(7.8), p(16.0), p(12.6)], start=0, end=180, fill=icon_color, width=stroke)
+    elif kind == "check":
+        draw.line([(p(4.2), p(10.5)), (p(8.0), p(14.0)), (p(15.8), p(6.0))], fill=icon_color, width=stroke)
+    elif kind == "x":
+        draw.line([(p(5.0), p(5.0)), (p(15.0), p(15.0))], fill=icon_color, width=stroke)
+        draw.line([(p(15.0), p(5.0)), (p(5.0), p(15.0))], fill=icon_color, width=stroke)
+    elif kind == "user":
+        draw.ellipse([p(7.0), p(3.8), p(13.0), p(9.8)], outline=icon_color, width=stroke)
+        draw.arc([p(4.4), p(10.0), p(15.6), p(18.0)], start=200, end=-20, fill=icon_color, width=stroke)
+    elif kind == "history":
         outline = [
             (p(6.2), p(3.4)),
             (p(12.7), p(3.4)),
@@ -104,6 +209,12 @@ def _make_line_icon(kind: str, color: str = TEXT, size: int = 20) -> ctk.CTkImag
             points.append((p(center[0] + math.cos(angle) * radius), p(center[1] + math.sin(angle) * radius)))
         draw.line(points + [points[0]], fill=icon_color, width=stroke, joint="curve")
         draw.ellipse([p(7.25), p(7.25), p(12.75), p(12.75)], outline=icon_color, width=stroke)
+    elif kind == "sync":
+        arc_box = [p(4.4), p(4.4), p(15.6), p(15.6)]
+        draw.arc(arc_box, start=25, end=190, fill=icon_color, width=stroke)
+        draw.arc(arc_box, start=205, end=10, fill=icon_color, width=stroke)
+        draw.polygon([(p(5.0), p(8.2)), (p(3.1), p(5.2)), (p(6.5), p(5.5))], fill=icon_color)
+        draw.polygon([(p(15.0), p(11.8)), (p(16.9), p(14.8)), (p(13.5), p(14.5))], fill=icon_color)
     elif kind == "close":
         inset = 6
         draw.line([(p(inset), p(inset)), (p(size - inset), p(size - inset))], fill=icon_color, width=stroke)
@@ -691,6 +802,236 @@ class LoadingPlaceholderFrame(ctk.CTkFrame):
     def destroy(self):
         self.stop()
         super().destroy()
+
+
+class AudoraCard(ctk.CTkFrame):
+    def __init__(self, master, *, soft: bool = False, **kwargs):
+        super().__init__(
+            master,
+            fg_color=SURFACE_ALT if soft else SURFACE,
+            border_color=BORDER,
+            border_width=1,
+            corner_radius=RADIUS_LG,
+            **kwargs,
+        )
+
+
+class AudoraButton(ctk.CTkButton):
+    def __init__(self, master, *, variant: str = "primary", **kwargs):
+        if variant == "primary":
+            defaults = {
+                "fg_color": ACCENT,
+                "hover_color": ACCENT_HOVER,
+                "text_color": ACCENT_TEXT,
+                "border_width": 0,
+            }
+        elif variant == "danger":
+            defaults = {
+                "fg_color": ROW_ERROR_BG,
+                "hover_color": DANGER,
+                "text_color": TEXT,
+                "border_color": DANGER,
+                "border_width": 1,
+            }
+        else:
+            defaults = {
+                "fg_color": SURFACE_ALT,
+                "hover_color": SURFACE_HOVER,
+                "text_color": TEXT,
+                "border_color": BORDER,
+                "border_width": 1,
+            }
+        defaults.setdefault("height", 38)
+        defaults.setdefault("corner_radius", RADIUS_SM)
+        defaults.setdefault("font", ui_font(13, "bold"))
+        defaults.update(kwargs)
+        super().__init__(master, **defaults)
+
+
+class AudoraIconButton(ctk.CTkButton):
+    def __init__(self, master, *, image=None, variant: str = "ghost", **kwargs):
+        if variant == "circle":
+            fg_color = ROW_ACTIVE_BG
+            hover_color = SURFACE_HOVER
+            border_color = BORDER_PINK
+        else:
+            fg_color = "transparent"
+            hover_color = SURFACE_HOVER
+            border_color = BORDER
+        defaults = {
+            "text": "",
+            "image": image,
+            "width": 38,
+            "height": 38,
+            "corner_radius": RADIUS_SM,
+            "fg_color": fg_color,
+            "hover_color": hover_color,
+            "border_color": border_color,
+            "border_width": 1 if variant == "circle" else 0,
+        }
+        defaults.update(kwargs)
+        super().__init__(
+            master,
+            **defaults,
+        )
+
+
+class AudoraInput(ctk.CTkEntry):
+    def __init__(self, master, **kwargs):
+        super().__init__(
+            master,
+            height=42,
+            corner_radius=RADIUS_MD,
+            fg_color=SURFACE,
+            border_color=BORDER,
+            border_width=1,
+            text_color=TEXT,
+            placeholder_text_color=MUTED_DARK,
+            font=ui_font(13),
+            **kwargs,
+        )
+
+
+class AudoraSelect(ctk.CTkOptionMenu):
+    def __init__(self, master, **kwargs):
+        super().__init__(
+            master,
+            height=38,
+            corner_radius=RADIUS_SM,
+            fg_color=SURFACE_ALT,
+            button_color=SURFACE_HOVER,
+            button_hover_color=ROW_ACTIVE_BG,
+            text_color=TEXT,
+            font=ui_font(13),
+            dropdown_fg_color=SURFACE,
+            dropdown_hover_color=ROW_ACTIVE_BG,
+            dropdown_text_color=TEXT,
+            **kwargs,
+        )
+
+
+class AudoraProgressBar(ctk.CTkProgressBar):
+    def __init__(self, master, **kwargs):
+        super().__init__(
+            master,
+            height=5,
+            corner_radius=8,
+            fg_color=SURFACE_HOVER,
+            progress_color=ACCENT,
+            **kwargs,
+        )
+
+
+class AudoraStatusBadge(ctk.CTkFrame):
+    def __init__(self, master, text: str, tone: str = "neutral", **kwargs):
+        colors = {
+            "success": (SUCCESS, "#0f2f1d"),
+            "danger": (DANGER, "#33141a"),
+            "warning": (WARNING, "#332511"),
+            "accent": (ACCENT, ROW_ACTIVE_BG),
+            "neutral": (MUTED, SURFACE_ALT),
+        }
+        text_color, bg_color = colors.get(tone, colors["neutral"])
+        super().__init__(master, fg_color=bg_color, corner_radius=999, border_width=1, border_color=BORDER, **kwargs)
+        self.label = ctk.CTkLabel(self, text=text, text_color=text_color, font=ui_font(12, "bold"))
+        self.label.pack(padx=10, pady=4)
+
+    def set_text(self, text: str):
+        self.label.configure(text=text)
+
+
+class AudoraToggle(ctk.CTkSwitch):
+    def __init__(self, master, **kwargs):
+        super().__init__(
+            master,
+            text="",
+            width=46,
+            progress_color=ACCENT,
+            fg_color=SURFACE_HOVER,
+            button_color=TEXT,
+            button_hover_color=TEXT_SOFT,
+            **kwargs,
+        )
+
+
+class AudoraSegmentedControl(ctk.CTkFrame):
+    def __init__(self, master, values: List[str], variable: ctk.StringVar, command=None, **kwargs):
+        super().__init__(
+            master,
+            fg_color=SURFACE,
+            border_color=BORDER,
+            border_width=1,
+            corner_radius=RADIUS_MD,
+            **kwargs,
+        )
+        self.values = values
+        self.variable = variable
+        self.command = command
+        self.buttons: Dict[str, ctk.CTkButton] = {}
+        for index, value in enumerate(values):
+            button = ctk.CTkButton(
+                self,
+                text=value,
+                width=92,
+                height=36,
+                corner_radius=RADIUS_SM,
+                fg_color="transparent",
+                hover_color=ROW_ACTIVE_BG,
+                text_color=TEXT_SOFT,
+                font=ui_font(13, "bold"),
+                command=lambda item=value: self.select(item),
+            )
+            button.grid(row=0, column=index, padx=(4 if index == 0 else 0, 4), pady=4, sticky="ew")
+            self.grid_columnconfigure(index, weight=1)
+            self.buttons[value] = button
+        self.refresh()
+
+    def select(self, value: str):
+        self.variable.set(value)
+        self.refresh()
+        if self.command:
+            self.command(value)
+
+    def refresh(self):
+        selected = self.variable.get()
+        for value, button in self.buttons.items():
+            button.configure(
+                fg_color=ROW_ACTIVE_BG if value == selected else "transparent",
+                text_color=TEXT if value == selected else TEXT_SOFT,
+                border_width=1 if value == selected else 0,
+                border_color=BORDER_PINK,
+            )
+
+
+class SidebarItem(ctk.CTkButton):
+    def __init__(self, master, label: str, icon, command, **kwargs):
+        super().__init__(
+            master,
+            text=label,
+            image=icon,
+            compound="left",
+            anchor="w",
+            width=210,
+            height=50,
+            corner_radius=RADIUS_MD,
+            fg_color="transparent",
+            hover_color=SURFACE_HOVER,
+            text_color=TEXT_SOFT,
+            font=ui_font(15),
+            command=command,
+            **kwargs,
+        )
+        self._selected = False
+
+    def set_selected(self, selected: bool):
+        self._selected = selected
+        self.configure(
+            fg_color=ROW_ACTIVE_BG if selected else "transparent",
+            hover_color=ROW_ACTIVE_BG if selected else SURFACE_HOVER,
+            text_color=TEXT if selected else TEXT_SOFT,
+            border_color=BORDER_PINK if selected else BG_SIDEBAR,
+            border_width=1 if selected else 0,
+        )
 
 
 class DownloadRow(ctk.CTkFrame):
@@ -1793,8 +2134,8 @@ class App(ctk.CTk):
         super().__init__()
         self.configure(fg_color=BG)
         self.title("Audora")
-        self.geometry("880x620")
-        self.minsize(780, 540)
+        self.geometry("1180x760")
+        self.minsize(980, 640)
 
         ensure_ffmpeg_or_die(self)
 
@@ -1811,12 +2152,52 @@ class App(ctk.CTk):
         self.out_dir_var = ctk.StringVar(value=self.settings["download_dir"])
         self.settings_btn: Optional[ctk.CTkButton] = None
         self.history_btn: Optional[ctk.CTkButton] = None
+        self.sync_btn: Optional[ctk.CTkButton] = None
         self.clear_downloads_btn: Optional[ctk.CTkButton] = None
         self.settings_panel = None
+        self.sync_panel = None
+        self.sync_server: Optional[AudoraSyncServer] = None
+        self.sync_server_error = ""
+        self.sync_status_var: Optional[ctk.StringVar] = None
+        self.sync_detail_var: Optional[ctk.StringVar] = None
+        self.sync_manual_var: Optional[ctk.StringVar] = None
+        self.sync_last_scan_var: Optional[ctk.StringVar] = None
+        self.sync_pair_code_var: Optional[ctk.StringVar] = None
+        self.sync_pair_detail_var: Optional[ctk.StringVar] = None
+        self.sync_payload_box = None
+        self.sync_qr_label = None
+        self.sync_qr_image = None
+        self.sync_manual_frame = None
+        self.sync_manual_toggle_btn = None
+        self.sync_manual_expanded = False
+        self.sync_devices_frame = None
+        self.sync_activity_frame = None
+        self.sync_activity_events: List[str] = []
         self.format_dropdown_panel = None
         self.icons = {
+            "home": _make_line_icon("home", TEXT_SOFT, 22),
+            "home_active": _make_line_icon("home", ACCENT, 22),
+            "library": _make_line_icon("library", TEXT_SOFT, 22),
+            "library_active": _make_line_icon("library", ACCENT, 22),
+            "download": _make_line_icon("download", TEXT_SOFT, 22),
+            "download_active": _make_line_icon("download", ACCENT, 22),
+            "devices": _make_line_icon("devices", TEXT_SOFT, 22),
+            "devices_active": _make_line_icon("devices", ACCENT, 22),
             "history": _make_line_icon("history", TEXT, 21),
-            "settings": _make_line_icon("settings", TEXT, 20),
+            "sync": _make_line_icon("sync", TEXT_SOFT, 20),
+            "sync_active": _make_line_icon("sync", ACCENT, 20),
+            "settings": _make_line_icon("settings", TEXT_SOFT, 20),
+            "settings_active": _make_line_icon("settings", ACCENT, 20),
+            "search": _make_line_icon("search", MUTED, 18),
+            "folder": _make_line_icon("folder", ACCENT, 20),
+            "heart": _make_line_icon("heart", TEXT_SOFT, 20),
+            "shuffle": _make_line_icon("shuffle", MUTED, 18),
+            "previous": _make_line_icon("previous", TEXT, 20),
+            "next": _make_line_icon("next", TEXT, 20),
+            "repeat": _make_line_icon("repeat", MUTED, 18),
+            "queue": _make_line_icon("queue", MUTED, 20),
+            "volume": _make_line_icon("volume", MUTED, 18),
+            "database": _make_line_icon("database", ACCENT, 18),
             "close": _make_line_icon("close", TEXT, 24),
             "back": _make_line_icon("back", TEXT, 22),
             "back_muted": _make_line_icon("back", MUTED_DARK, 22),
@@ -1839,10 +2220,17 @@ class App(ctk.CTk):
         self._current_total_items: Optional[int] = None
         self._cancel_requested = False
         self._downloads_visible = False
+        self.nav_buttons: Dict[str, SidebarItem] = {}
+        self.active_nav = "Downloads"
+        self.mini_title_var = ctk.StringVar(value="A Moment Apart")
+        self.mini_artist_var = ctk.StringVar(value="ODESZA")
+        self.mini_playing = False
 
         # UI build
         self._build_ui()
         self._clear_activity()
+        self._start_sync_server()
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
         # Poll queues
         self.after(80, self._drain_log_queue)
@@ -1853,51 +2241,37 @@ class App(ctk.CTk):
     # UI layout
     # ------------------------------------------------------------
     def _build_ui(self):
-        # Header
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(pady=(18, 8), padx=30, fill="x")
-        header.grid_columnconfigure(0, weight=1)
-        header.grid_columnconfigure(1, weight=0)
+        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=0)
 
-        title = ctk.CTkLabel(header, text="Audora", font=("Segoe UI", 22, "bold"), text_color=TEXT)
-        title.grid(row=0, column=0, sticky="w")
-
-        header_actions = ctk.CTkFrame(header, fg_color="transparent")
-        header_actions.grid(row=0, column=1, sticky="e")
-
-        self.history_btn = ctk.CTkButton(
-            header_actions,
-            text="",
-            image=self.icons["history"],
-            width=32,
-            height=32,
+        self.sidebar = ctk.CTkFrame(
+            self,
+            width=SIDEBAR_WIDTH,
+            fg_color=BG_SIDEBAR,
             corner_radius=0,
-            fg_color="transparent",
-            hover_color=BG,
-            command=self._show_history,
+            border_width=1,
+            border_color=BORDER,
         )
-        self.history_btn.pack(side="left", padx=(0, 8))
-        InAppTooltip(self, self.history_btn, "History")
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.grid_propagate(False)
+        self.sidebar.grid_columnconfigure(0, weight=1)
+        self.sidebar.grid_rowconfigure(2, weight=1)
+        self._build_sidebar()
 
-        self.settings_btn = ctk.CTkButton(
-            header_actions,
-            text="",
-            image=self.icons["settings"],
-            width=32,
-            height=32,
-            corner_radius=0,
-            fg_color="transparent",
-            hover_color=BG,
-            command=self._open_settings,
-        )
-        self.settings_btn.pack(side="left")
-        InAppTooltip(self, self.settings_btn, "Settings")
+        self.main_shell = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        self.main_shell.grid(row=0, column=1, sticky="nsew")
+        self.main_shell.grid_columnconfigure(0, weight=1)
+        self.main_shell.grid_rowconfigure(1, weight=1)
 
-        self.content_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.content_frame.pack(fill="both", expand=True, padx=30, pady=(0, 0))
+        self._build_topbar()
+
+        self.content_frame = ctk.CTkFrame(self.main_shell, fg_color="transparent")
+        self.content_frame.grid(row=1, column=0, sticky="nsew", padx=42, pady=(0, 18))
 
         self.input_section = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        self.input_section.pack(fill="x", expand=True, padx=54)
+        self.input_section.pack(fill="x", expand=True, padx=36, pady=(18, 0))
 
         self.launch_intro_frame = ctk.CTkFrame(self.input_section, fg_color="transparent")
         self.launch_intro_frame.pack(fill="x", pady=(0, 22))
@@ -1905,7 +2279,7 @@ class App(ctk.CTk):
         self.launch_title = ctk.CTkLabel(
             self.launch_intro_frame,
             text="Audora",
-            font=("Segoe UI", 36, "bold"),
+            font=ui_font(36, "bold"),
             text_color=TEXT,
         )
         self.launch_title.pack(pady=(0, 8))
@@ -1913,7 +2287,7 @@ class App(ctk.CTk):
         self.launch_subtitle = ctk.CTkLabel(
             self.launch_intro_frame,
             text="Download audio, video, and playlists from a YouTube link.",
-            font=("Segoe UI", 14),
+            font=ui_font(14),
             text_color=MUTED,
             wraplength=620,
             justify="center",
@@ -1923,9 +2297,9 @@ class App(ctk.CTk):
         self.input_shell = ComposerShell(
             self.input_section,
             command=self._toggle_download,
-            height=46,
-            corner_radius=23,
-            fg_color=SURFACE_ALT,
+            height=54,
+            corner_radius=27,
+            fg_color=SURFACE,
             border_color=BORDER,
             bg_color=BG,
         )
@@ -1938,74 +2312,73 @@ class App(ctk.CTk):
             self.input_shell,
             placeholder_text="Paste YouTube URL here...",
             width=240,
-            height=34,
+            height=40,
             corner_radius=0,
-            bg_color=SURFACE_ALT,
-            fg_color=SURFACE_ALT,
+            bg_color=SURFACE,
+            fg_color=SURFACE,
             border_width=0,
             text_color=TEXT,
             placeholder_text_color=MUTED_DARK,
         )
-        self.url_entry.place(x=18, y=6)
+        self.url_entry.place(x=18, y=7)
         self.url_entry.bind("<Return>", self._on_url_submit)
 
         self.format_menu = tk.Label(
             self.input_shell,
             text=self._format_dropdown_label(),
-            bg=SURFACE_ALT,
+            bg=SURFACE,
             fg=TEXT_SOFT,
-            activebackground=SURFACE_ALT,
+            activebackground=SURFACE,
             activeforeground=TEXT,
             borderwidth=0,
             highlightthickness=0,
-            font=("Segoe UI", 9),
+            font=(FONT_FAMILY, 10),
             cursor="hand2",
         )
         self.format_menu.bind("<Button-1>", lambda _event: self._toggle_format_dropdown(), add="+")
-        self.format_menu.place(x=260, y=7, width=72, height=32)
+        self.format_menu.place(x=260, y=10, width=78, height=34)
 
         self.start_btn = self.input_shell.start_button
+        self.start_btn.configure(width=92, height=44, corner_radius=22)
 
         self.input_hint_var = ctk.StringVar(value="")
         self.input_hint_label = ctk.CTkLabel(
             self.input_section,
             textvariable=self.input_hint_var,
             text_color=MUTED,
-            font=("Segoe UI", 12),
+            font=ui_font(12),
             anchor="center",
         )
         self.input_hint_label.pack(pady=(8, 0))
 
         # Activity + download list
-        self.downloads_card = ctk.CTkFrame(self.content_frame, fg_color=SURFACE, corner_radius=14)
+        self.downloads_card = AudoraCard(self.content_frame)
 
         header_row = ctk.CTkFrame(self.downloads_card, fg_color="transparent")
-        header_row.pack(fill="x", padx=16, pady=(16, 8))
+        header_row.pack(fill="x", padx=18, pady=(18, 8))
 
         self.jobs_title_var = ctk.StringVar(value="Waiting for downloads")
         jobs_title = ctk.CTkLabel(
             header_row,
             textvariable=self.jobs_title_var,
-            font=("Segoe UI", 17, "bold"),
+            font=ui_font(17, "bold"),
             text_color=TEXT,
         )
         jobs_title.pack(side="left")
 
-        self.clear_downloads_btn = ctk.CTkButton(
+        self.clear_downloads_btn = AudoraButton(
             header_row,
             text="Clear",
+            variant="secondary",
             width=64,
             height=30,
             corner_radius=8,
             command=self._reset_to_start_state,
-            fg_color=SURFACE_ALT,
-            hover_color=SURFACE_HOVER,
-            text_color=TEXT,
         )
         self.clear_downloads_btn.pack(side="right")
         self.clear_downloads_btn.pack_forget()
 
-        header_divider = ctk.CTkFrame(self.downloads_card, height=2, fg_color=BORDER)
+        header_divider = ctk.CTkFrame(self.downloads_card, height=1, fg_color=BORDER)
         header_divider.pack(fill="x", padx=16, pady=(0, 12))
 
         self.download_list = DownloadList(self.downloads_card, width=780, height=260)
@@ -2014,14 +2387,310 @@ class App(ctk.CTk):
         self.status_var = ctk.StringVar(value="Ready")
         self.status_label = ctk.CTkLabel(
             self, textvariable=self.status_var,
-            text_color=MUTED, font=("Segoe UI", 12)
+            text_color=MUTED, font=ui_font(12)
         )
 
+        self._build_bottom_player()
+        self._set_active_nav("Downloads")
         self._update_input_hint()
         self._update_window_title()
+        self.bind_all("<Control-k>", self._focus_search, add="+")
+        self.bind_all("<Command-k>", self._focus_search, add="+")
 
 
 
+
+    def _build_sidebar(self):
+        logo = ctk.CTkLabel(
+            self.sidebar,
+            text="Audora",
+            text_color=ACCENT,
+            font=ui_font(34, "bold"),
+            anchor="w",
+        )
+        logo.grid(row=0, column=0, sticky="ew", padx=34, pady=(34, 28))
+
+        nav_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        nav_frame.grid(row=1, column=0, sticky="new", padx=22)
+
+        nav_items = [
+            ("Overview", "home", lambda: self._show_download_workspace("Overview")),
+            ("Library", "library", self._show_history),
+            ("Downloads", "download", lambda: self._show_download_workspace("Downloads")),
+            ("Devices", "devices", self._open_sync_panel),
+            ("Sync", "sync", self._open_sync_panel),
+            ("Settings", "settings", self._open_settings),
+        ]
+
+        for label, icon_key, command in nav_items:
+            item = SidebarItem(
+                nav_frame,
+                label,
+                self.icons[icon_key],
+                command=lambda name=label, callback=command: self._on_nav(name, callback),
+            )
+            item.pack(fill="x", pady=(0, 9))
+            self.nav_buttons[label] = item
+
+        self.history_btn = self.nav_buttons.get("Library")
+        self.sync_btn = self.nav_buttons.get("Sync")
+        self.settings_btn = self.nav_buttons.get("Settings")
+
+        used_gb, total_gb, percent = self._storage_usage_summary()
+        storage_card = AudoraCard(self.sidebar, soft=True)
+        storage_card.grid(row=3, column=0, sticky="sew", padx=22, pady=(18, 24))
+        storage_card.grid_columnconfigure(1, weight=1)
+
+        storage_icon = ctk.CTkLabel(storage_card, text="", image=self.icons["database"], width=40, height=40)
+        storage_icon.grid(row=0, column=0, rowspan=2, padx=(14, 10), pady=(14, 6), sticky="nw")
+        title = ctk.CTkLabel(storage_card, text="Storage Used", text_color=TEXT, font=ui_font(13, "bold"), anchor="w")
+        title.grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=(14, 0))
+        detail = ctk.CTkLabel(
+            storage_card,
+            text=f"{used_gb} GB of {total_gb} GB",
+            text_color=MUTED,
+            font=ui_font(12),
+            anchor="w",
+        )
+        detail.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=(0, 6))
+        bar = AudoraProgressBar(storage_card)
+        bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 16))
+        bar.set(percent / 100 if total_gb else 0)
+        percent_label = ctk.CTkLabel(storage_card, text=f"{percent}%", text_color=ACCENT, font=ui_font(12, "bold"))
+        percent_label.grid(row=2, column=2, padx=(0, 14), pady=(6, 16))
+
+    def _build_topbar(self):
+        topbar = ctk.CTkFrame(self.main_shell, fg_color="transparent", height=TOPBAR_HEIGHT)
+        topbar.grid(row=0, column=0, sticky="ew", padx=42, pady=(18, 0))
+        topbar.grid_propagate(False)
+        topbar.grid_columnconfigure(0, weight=1)
+
+        search_shell = ctk.CTkFrame(
+            topbar,
+            width=390,
+            height=46,
+            fg_color=SURFACE,
+            corner_radius=23,
+            border_color=BORDER,
+            border_width=1,
+        )
+        search_shell.grid(row=0, column=0, sticky="w", pady=(4, 0))
+        search_shell.grid_propagate(False)
+        search_shell.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(search_shell, text="", image=self.icons["search"], width=28).grid(row=0, column=0, padx=(14, 4), pady=10)
+        self.search_entry = ctk.CTkEntry(
+            search_shell,
+            placeholder_text="Search tracks, artists, albums...",
+            height=34,
+            width=260,
+            corner_radius=0,
+            fg_color=SURFACE,
+            bg_color=SURFACE,
+            border_width=0,
+            text_color=TEXT,
+            placeholder_text_color=MUTED,
+            font=ui_font(13),
+        )
+        self.search_entry.grid(row=0, column=1, sticky="ew", pady=6)
+        key_hint = ctk.CTkLabel(
+            search_shell,
+            text="Ctrl K",
+            text_color=MUTED,
+            fg_color=SURFACE_HOVER,
+            corner_radius=7,
+            font=ui_font(10, "bold"),
+            width=42,
+            height=24,
+        )
+        key_hint.grid(row=0, column=2, padx=(8, 12), pady=10)
+
+        right = ctk.CTkFrame(topbar, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="e", pady=(4, 0))
+
+        self.sync_top_status_var = ctk.StringVar(value="Local sync online")
+        status_pill = ctk.CTkFrame(
+            right,
+            fg_color=SURFACE,
+            border_color=BORDER,
+            border_width=1,
+            corner_radius=23,
+            height=46,
+        )
+        status_pill.pack(side="left", padx=(0, 12))
+        ctk.CTkLabel(status_pill, text="●", text_color=SUCCESS, font=ui_font(18), width=18).pack(side="left", padx=(14, 4), pady=8)
+        ctk.CTkLabel(
+            status_pill,
+            textvariable=self.sync_top_status_var,
+            text_color=TEXT,
+            font=ui_font(13, "bold"),
+        ).pack(side="left", padx=(0, 14), pady=8)
+
+        profile = ctk.CTkFrame(
+            right,
+            fg_color=SURFACE,
+            border_color=BORDER,
+            border_width=1,
+            corner_radius=23,
+            height=46,
+        )
+        profile.pack(side="left")
+        avatar = ctk.CTkLabel(
+            profile,
+            text="A",
+            text_color=TEXT,
+            fg_color=ACCENT,
+            corner_radius=18,
+            width=32,
+            height=32,
+            font=ui_font(14, "bold"),
+        )
+        avatar.pack(side="left", padx=(8, 10), pady=7)
+        ctk.CTkLabel(profile, text="Audora Local", text_color=TEXT, font=ui_font(13, "bold")).pack(side="left", padx=(0, 14), pady=8)
+
+    def _build_bottom_player(self):
+        self.bottom_player = ctk.CTkFrame(
+            self,
+            fg_color=BG,
+            corner_radius=0,
+            border_width=1,
+            border_color=BORDER,
+            height=MINI_PLAYER_HEIGHT,
+        )
+        self.bottom_player.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.bottom_player.grid_propagate(False)
+        self.bottom_player.grid_columnconfigure(2, weight=1)
+        self.bottom_player.grid_columnconfigure(4, weight=1)
+
+        art = ctk.CTkFrame(
+            self.bottom_player,
+            width=54,
+            height=54,
+            corner_radius=8,
+            fg_color=ROW_ACTIVE_BG,
+            border_width=1,
+            border_color=BORDER_PINK,
+        )
+        art.grid(row=0, column=0, padx=(28, 14), pady=18)
+        art.grid_propagate(False)
+        ctk.CTkLabel(art, text="A", text_color=ACCENT, font=ui_font(22, "bold")).place(relx=0.5, rely=0.5, anchor="center")
+
+        track = ctk.CTkFrame(self.bottom_player, fg_color="transparent")
+        track.grid(row=0, column=1, sticky="w", pady=16)
+        ctk.CTkLabel(track, textvariable=self.mini_title_var, text_color=TEXT, font=ui_font(14, "bold"), anchor="w").pack(anchor="w")
+        ctk.CTkLabel(track, textvariable=self.mini_artist_var, text_color=MUTED, font=ui_font(12), anchor="w").pack(anchor="w", pady=(3, 0))
+
+        heart = AudoraIconButton(self.bottom_player, image=self.icons["heart"], width=36, height=36)
+        heart.grid(row=0, column=2, sticky="w", padx=(24, 0))
+        InAppTooltip(self, heart, "Favorite")
+
+        controls = ctk.CTkFrame(self.bottom_player, fg_color="transparent")
+        controls.grid(row=0, column=3, pady=16)
+        AudoraIconButton(controls, image=self.icons["shuffle"], width=36, height=36).pack(side="left", padx=8)
+        AudoraIconButton(controls, image=self.icons["previous"], width=38, height=38).pack(side="left", padx=8)
+        self.mini_play_btn = ctk.CTkButton(
+            controls,
+            text="",
+            image=self.icons["play"],
+            width=58,
+            height=58,
+            corner_radius=29,
+            fg_color=ACCENT,
+            hover_color=ACCENT_HOVER,
+            command=self._toggle_mini_playback,
+        )
+        self.mini_play_btn.pack(side="left", padx=14)
+        AudoraIconButton(controls, image=self.icons["next"], width=38, height=38).pack(side="left", padx=8)
+        AudoraIconButton(controls, image=self.icons["repeat"], width=36, height=36).pack(side="left", padx=8)
+
+        volume = ctk.CTkFrame(self.bottom_player, fg_color="transparent")
+        volume.grid(row=0, column=4, sticky="e", padx=(0, 28), pady=16)
+        ctk.CTkLabel(volume, text="", image=self.icons["volume"], width=28).pack(side="left", padx=(0, 8))
+        self.mini_volume_slider = ctk.CTkSlider(
+            volume,
+            from_=0,
+            to=100,
+            width=180,
+            fg_color=SURFACE_HOVER,
+            progress_color=ACCENT,
+            button_color=MUTED,
+            button_hover_color=TEXT,
+            command=self._on_mini_volume_change,
+        )
+        self.mini_volume_slider.pack(side="left", padx=(0, 18))
+        self.mini_volume_slider.set(70)
+        AudoraIconButton(volume, image=self.icons["queue"], width=38, height=38).pack(side="left")
+
+    def _storage_usage_summary(self):
+        directory = (self.out_dir_var.get() or "").strip() or default_download_dir()
+        probe_path = directory if os.path.exists(directory) else os.path.dirname(directory) or os.path.expanduser("~")
+        try:
+            total, used, _free = shutil.disk_usage(probe_path)
+            total_gb = max(1, round(total / (1024 ** 3)))
+            used_gb = max(0, round(used / (1024 ** 3)))
+            percent = max(0, min(100, round((used / total) * 100))) if total else 0
+            return used_gb, total_gb, percent
+        except OSError:
+            return 186, 500, 37
+
+    def _on_nav(self, name: str, callback):
+        self._set_active_nav(name)
+        callback()
+
+    def _set_active_nav(self, name: str):
+        self.active_nav = name
+        for label, button in self.nav_buttons.items():
+            button.set_selected(label == name)
+            icon_key = label.lower()
+            if label == "Overview":
+                icon_key = "home"
+            elif label == "Downloads":
+                icon_key = "download"
+            elif label == "Devices":
+                icon_key = "devices"
+            selected_icon_key = f"{icon_key}_active" if label == name else icon_key
+            if selected_icon_key in self.icons:
+                button.configure(image=self.icons[selected_icon_key])
+
+    def _show_download_workspace(self, active_name: str = "Downloads"):
+        self._hide_format_dropdown()
+        self._set_active_nav(active_name)
+        if self.history_panel:
+            self._hide_history_panel()
+        if self.settings_panel:
+            self._close_settings_window()
+        if self.sync_panel:
+            self._close_sync_panel()
+        self.lift()
+
+    def _focus_search(self, _event=None):
+        if hasattr(self, "search_entry"):
+            self.search_entry.focus_set()
+            self.search_entry.select_range(0, "end")
+        return "break"
+
+    def _set_mini_track(self, file_path: str):
+        title = os.path.splitext(os.path.basename(file_path or ""))[0] or "Now playing"
+        self.mini_title_var.set(title)
+        self.mini_artist_var.set("Local file")
+
+    def _set_mini_playing(self, playing: bool):
+        self.mini_playing = playing
+        if hasattr(self, "mini_play_btn"):
+            self.mini_play_btn.configure(image=self.icons["pause" if playing else "play"])
+
+    def _toggle_mini_playback(self):
+        if self.history_player and self.history_player.file_path:
+            self.history_player._toggle_playback()
+            self._set_mini_playing(self.history_player.playing)
+            return
+        self._show_history()
+
+    def _on_mini_volume_change(self, value):
+        if self.history_player and getattr(self.history_player, "_vlc_player", None) is not None:
+            try:
+                self.history_player._vlc_player.audio_set_volume(max(0, min(100, int(float(value)))))
+            except Exception:
+                pass
 
     # ------------------------------------------------------------
     # UI events
@@ -2032,16 +2701,16 @@ class App(ctk.CTk):
         width = max(self.input_shell.winfo_width(), 1)
         button_width = int(self.start_btn.cget("width"))
         button_right_inset = int(self.start_btn.cget("right_inset"))
-        format_width = 72
-        format_gap = 5
+        format_width = 78
+        format_gap = 8
         left_pad = 18
         entry_gap = 8
         format_x = max(left_pad + 90, width - button_right_inset - button_width - format_gap - format_width)
         entry_width = max(80, format_x - left_pad - entry_gap)
 
         self.url_entry.configure(width=entry_width)
-        self.url_entry.place_configure(x=left_pad, y=6)
-        self.format_menu.place_configure(x=format_x, y=7, width=format_width, height=32)
+        self.url_entry.place_configure(x=left_pad, y=7)
+        self.format_menu.place_configure(x=format_x, y=10, width=format_width, height=34)
 
     def _set_format_menu_state(self, state: str):
         if not hasattr(self, "format_menu"):
@@ -2053,7 +2722,7 @@ class App(ctk.CTk):
         )
 
     def _format_dropdown_label(self) -> str:
-        return f"{self.format_var.get()} ▾"
+        return f"{self.format_var.get()} v"
 
     def _hide_format_dropdown(self):
         if self.format_dropdown_panel is None:
@@ -2145,7 +2814,7 @@ class App(ctk.CTk):
         self._hide_launch_intro()
         self._set_downloads_clear_visible(False)
         self.input_section.pack_forget()
-        self.input_section.pack(fill="x", padx=0, pady=(28, 10))
+        self.input_section.pack(fill="x", padx=0, pady=(22, 10))
         self.downloads_card.pack(fill="both", expand=True, pady=(8, 12))
 
     def _reset_to_start_state(self):
@@ -2176,7 +2845,7 @@ class App(ctk.CTk):
             text_color=ACCENT_TEXT,
         )
         self.input_section.pack_forget()
-        self.input_section.pack(fill="x", expand=True, padx=54)
+        self.input_section.pack(fill="x", expand=True, padx=36, pady=(18, 0))
         self._show_launch_intro()
         self._update_input_hint()
         self.after_idle(self._layout_input_shell_children)
@@ -2209,6 +2878,572 @@ class App(ctk.CTk):
         if chosen:
             target.set(chosen)
 
+    # ------------------------------------------------------------
+    # Local sync
+    # ------------------------------------------------------------
+    def _sync_library_dirs(self) -> List[str]:
+        download_dir = (self.out_dir_var.get() or "").strip() or default_download_dir()
+        return [download_dir] if download_dir else []
+
+    def _start_sync_server(self):
+        if self.sync_server is not None:
+            return True
+        try:
+            self.sync_server = AudoraSyncServer(
+                library_dirs=self._sync_library_dirs(),
+                port=DEFAULT_SYNC_PORT,
+            )
+            self.sync_server.start()
+            self.sync_server_error = ""
+            if hasattr(self, "sync_top_status_var"):
+                self.sync_top_status_var.set("Local sync online")
+            self._log(f"[{human_time()}] Local sync running on {self.sync_server.base_url}")
+            self._add_sync_activity(f"Server started on {self.sync_server.base_url}")
+            return True
+        except OSError as exc:
+            self.sync_server = None
+            self.sync_server_error = f"Could not start local sync on port {DEFAULT_SYNC_PORT}: {exc}"
+            if hasattr(self, "sync_top_status_var"):
+                self.sync_top_status_var.set("Local sync offline")
+            self._log(f"[{human_time()}] {self.sync_server_error}")
+            self._add_sync_activity("Server failed to start")
+            return False
+
+    def _stop_sync_server(self):
+        if self.sync_server is None:
+            return
+        try:
+            self.sync_server.close()
+        except Exception:  # pylint: disable=broad-except
+            pass
+        self.sync_server = None
+        if hasattr(self, "sync_top_status_var"):
+            self.sync_top_status_var.set("Local sync offline")
+
+    def _restart_sync_server(self):
+        self._stop_sync_server()
+        started = self._start_sync_server()
+        self._add_sync_activity("Server restarted" if started else "Server restart failed")
+        self._refresh_sync_panel()
+
+    def _update_sync_library_dirs(self):
+        if self.sync_server is not None:
+            self.sync_server.state.library_dirs = self._sync_library_dirs()
+
+    def _on_window_close(self):
+        self._stop_sync_server()
+        self.destroy()
+
+    def destroy(self):
+        self._stop_sync_server()
+        super().destroy()
+
+    def _close_sync_panel(self):
+        if self.sync_panel is None:
+            return
+        self.sync_panel.destroy()
+        self.sync_panel = None
+        self.sync_status_var = None
+        self.sync_detail_var = None
+        self.sync_manual_var = None
+        self.sync_last_scan_var = None
+        self.sync_pair_code_var = None
+        self.sync_pair_detail_var = None
+        self.sync_payload_box = None
+        self.sync_qr_label = None
+        self.sync_qr_image = None
+        self.sync_manual_frame = None
+        self.sync_manual_toggle_btn = None
+        self.sync_manual_expanded = False
+        self.sync_devices_frame = None
+        self.sync_activity_frame = None
+
+    def _set_sync_payload_text(self, text: str):
+        if self.sync_payload_box is None:
+            return
+        self.sync_payload_box.configure(state="normal")
+        self.sync_payload_box.delete("1.0", "end")
+        if text:
+            self.sync_payload_box.insert("1.0", text)
+        self.sync_payload_box.configure(state="disabled")
+
+    def _toggle_sync_manual_details(self):
+        if self.sync_manual_frame is None:
+            return
+        self.sync_manual_expanded = not self.sync_manual_expanded
+        if self.sync_manual_expanded:
+            self.sync_manual_frame.grid()
+            if self.sync_manual_toggle_btn is not None:
+                self.sync_manual_toggle_btn.configure(text="Hide Manual Pairing")
+        else:
+            self.sync_manual_frame.grid_remove()
+            if self.sync_manual_toggle_btn is not None:
+                self.sync_manual_toggle_btn.configure(text="Manual Pairing")
+
+    def _set_sync_qr_placeholder(self, text: str):
+        if self.sync_qr_label is None:
+            return
+        self.sync_qr_image = None
+        self.sync_qr_label.configure(text=text, image=None)
+
+    def _render_sync_qr(self, payload: dict):
+        if self.sync_qr_label is None:
+            return
+        try:
+            import qrcode
+
+            qr_text = json.dumps(payload, separators=(",", ":"))
+            qr = qrcode.QRCode(
+                version=None,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=8,
+                border=2,
+            )
+            qr.add_data(qr_text)
+            qr.make(fit=True)
+            qr_image = qr.make_image(fill_color="#111111", back_color="#ffffff").convert("RGB")
+            qr_image = qr_image.resize((132, 132), _RESAMPLE)
+            self.sync_qr_image = ctk.CTkImage(light_image=qr_image, dark_image=qr_image, size=(132, 132))
+            self.sync_qr_label.configure(text="", image=self.sync_qr_image)
+        except ImportError:
+            self._set_sync_qr_placeholder("QR package missing")
+            if self.sync_pair_detail_var:
+                self.sync_pair_detail_var.set("Install requirements again to enable QR pairing. Manual code still works.")
+        except Exception as exc:  # pylint: disable=broad-except
+            self._set_sync_qr_placeholder("QR failed")
+            if self.sync_pair_detail_var:
+                self.sync_pair_detail_var.set(f"QR render failed: {exc}. Manual code still works.")
+
+    def _format_sync_timestamp(self, timestamp_ms: int) -> str:
+        if not timestamp_ms:
+            return "Never"
+        return datetime.fromtimestamp(timestamp_ms / 1000).strftime("%Y-%m-%d %H:%M")
+
+    def _sync_base_url_parts(self, base_url: str) -> tuple[str, str]:
+        parsed = urlparse(base_url or "")
+        host = parsed.hostname or ""
+        port = str(parsed.port or DEFAULT_SYNC_PORT)
+        return host, port
+
+    def _add_sync_activity(self, message: str):
+        clean = (message or "").strip()
+        if not clean:
+            return
+        stamped = f"{datetime.now().strftime('%H:%M')}  {clean}"
+        self.sync_activity_events.append(stamped)
+        self.sync_activity_events = self.sync_activity_events[-8:]
+        self._render_sync_activity()
+
+    def _render_sync_activity(self):
+        if self.sync_activity_frame is None:
+            return
+        for child in self.sync_activity_frame.winfo_children():
+            child.destroy()
+
+        reports = self.sync_server.database.list_recent_sync_reports(5) if self.sync_server else []
+        rows = []
+        for report in reports:
+            time_label = self._format_sync_timestamp(report.synced_at)
+            rows.append(f"{time_label}  {report.device_name}: {report.status} {report.track_title}")
+        rows.extend(reversed(self.sync_activity_events[-5:]))
+
+        if not rows:
+            empty = ctk.CTkLabel(
+                self.sync_activity_frame,
+                text="No sync activity yet.",
+                text_color=MUTED,
+                font=("Segoe UI", 13),
+            )
+            empty.pack(anchor="w", padx=12, pady=12)
+            return
+
+        for item in rows[:7]:
+            label = ctk.CTkLabel(
+                self.sync_activity_frame,
+                text=item,
+                text_color=TEXT_SOFT,
+                font=("Segoe UI", 12),
+                justify="left",
+                anchor="w",
+                wraplength=250,
+            )
+            label.pack(fill="x", anchor="w", padx=12, pady=(8, 0))
+
+    def _render_paired_devices(self):
+        if self.sync_devices_frame is None:
+            return
+        for child in self.sync_devices_frame.winfo_children():
+            child.destroy()
+
+        devices = self.sync_server.database.list_paired_devices() if self.sync_server else []
+        if not devices:
+            empty = ctk.CTkLabel(
+                self.sync_devices_frame,
+                text="No paired phones yet.",
+                text_color=MUTED,
+                font=("Segoe UI", 13),
+            )
+            empty.pack(anchor="w", padx=12, pady=12)
+            return
+
+        for device in devices:
+            row = ctk.CTkFrame(self.sync_devices_frame, fg_color=ROW_BG, corner_radius=8)
+            row.pack(fill="x", padx=8, pady=(8, 0))
+            row.grid_columnconfigure(0, weight=1)
+
+            title = device.name or "Audora Mobile"
+            platform = f" • {device.platform}" if device.platform else ""
+            last_seen = self._format_sync_timestamp(device.last_seen_at)
+            text = f"{title}{platform}\nLast seen: {last_seen}"
+            label = ctk.CTkLabel(row, text=text, text_color=TEXT, font=("Segoe UI", 13), justify="left", anchor="w")
+            label.grid(row=0, column=0, sticky="ew", padx=12, pady=10)
+
+            revoke_btn = ctk.CTkButton(
+                row,
+                text="Revoke",
+                width=74,
+                height=30,
+                corner_radius=8,
+                fg_color=ROW_ERROR_BG,
+                hover_color=DANGER,
+                text_color=TEXT,
+                command=lambda device_id=device.id: self._revoke_sync_device(device_id),
+            )
+            revoke_btn.grid(row=0, column=1, padx=(8, 12), pady=10)
+
+    def _refresh_sync_panel(self):
+        if self.sync_status_var is None or self.sync_detail_var is None:
+            return
+        if self.sync_server is None:
+            self.sync_status_var.set("Local sync is not running")
+            self.sync_detail_var.set(self.sync_server_error or "Port unavailable.")
+            if self.sync_manual_var:
+                self.sync_manual_var.set("Start local sync to show manual pairing details.")
+            if self.sync_last_scan_var:
+                self.sync_last_scan_var.set("Last scan: never")
+        else:
+            self._update_sync_library_dirs()
+            devices = self.sync_server.database.list_paired_devices()
+            device_count = len(devices)
+            plural = "phone" if device_count == 1 else "phones"
+            track_count = self.sync_server.database.count_tracks()
+            last_scan_at = self.sync_server.database.get_setting("last_scan_at")
+            last_scan_count = self.sync_server.database.get_setting("last_scan_count")
+            self.sync_status_var.set("Local sync is running")
+            if self.sync_last_scan_var:
+                if last_scan_at:
+                    self.sync_last_scan_var.set(
+                        f"Last scan: {self._format_sync_timestamp(int(last_scan_at))} - {last_scan_count or track_count} tracks"
+                    )
+                else:
+                    self.sync_last_scan_var.set("Last scan: never")
+            self.sync_detail_var.set(
+                f"{self.sync_server.base_url} - {device_count} paired {plural} - {track_count} indexed tracks"
+            )
+        self._render_paired_devices()
+        self._render_sync_activity()
+
+    def _scan_sync_library(self):
+        if not self._start_sync_server():
+            self._refresh_sync_panel()
+            return
+        self._update_sync_library_dirs()
+        if self.sync_status_var:
+            self.sync_status_var.set("Scanning library...")
+        if self.sync_detail_var:
+            self.sync_detail_var.set("Indexing local media for mobile sync.")
+
+        def worker():
+            try:
+                tracks = self.sync_server.scan_library() if self.sync_server else []
+                message = f"Indexed {len(tracks)} tracks."
+                error = None
+                if self.sync_server:
+                    self.sync_server.database.set_setting("last_scan_at", str(int(datetime.now().timestamp() * 1000)))
+                    self.sync_server.database.set_setting("last_scan_count", str(len(tracks)))
+            except Exception as exc:  # pylint: disable=broad-except
+                message = "Library scan failed."
+                error = str(exc)
+
+            def apply():
+                if error:
+                    if self.sync_status_var:
+                        self.sync_status_var.set(message)
+                    if self.sync_detail_var:
+                        self.sync_detail_var.set(error)
+                else:
+                    self._refresh_sync_panel()
+                    if self.sync_detail_var:
+                        self.sync_detail_var.set(f"{self.sync_server.base_url} • {message}")
+                if not error:
+                    self._add_sync_activity(message)
+                self._log(f"[{human_time()}] {message}")
+
+            self.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _test_sync_server(self):
+        if not self._start_sync_server():
+            self._refresh_sync_panel()
+            return
+        self._update_sync_library_dirs()
+        base_url = self.sync_server.base_url
+        if self.sync_status_var:
+            self.sync_status_var.set("Testing local sync...")
+        if self.sync_detail_var:
+            self.sync_detail_var.set(f"Checking {base_url}/api/v1/health")
+
+        def worker():
+            try:
+                request = Request(f"{base_url}/api/v1/health", headers={"User-Agent": "Audora Desktop"})
+                with urlopen(request, timeout=4) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                ok = bool(payload.get("ok")) and payload.get("app") == "Audora Desktop"
+                message = "Local sync test passed." if ok else "Local sync returned an unexpected response."
+                error = None if ok else json.dumps(payload)
+            except Exception as exc:  # pylint: disable=broad-except
+                message = "Local sync test failed."
+                error = str(exc)
+
+            def apply():
+                if error:
+                    if self.sync_status_var:
+                        self.sync_status_var.set(message)
+                    if self.sync_detail_var:
+                        self.sync_detail_var.set(error)
+                    self._add_sync_activity("Local sync test failed")
+                else:
+                    self._refresh_sync_panel()
+                    if self.sync_detail_var:
+                        self.sync_detail_var.set(f"{base_url} - health check passed")
+                    self._add_sync_activity("Local sync test passed")
+                self._log(f"[{human_time()}] {message}")
+
+            self.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _generate_sync_pairing(self):
+        if not self._start_sync_server():
+            self._refresh_sync_panel()
+            return
+        self._update_sync_library_dirs()
+        payload = self.sync_server.create_pairing_session()
+        expires_at = self._format_sync_timestamp(int(payload["expiresAt"]))
+        if self.sync_pair_code_var:
+            self.sync_pair_code_var.set(str(payload["pairingToken"]))
+        if self.sync_pair_detail_var:
+            self.sync_pair_detail_var.set(f"{payload['baseUrl']} • expires {expires_at}")
+        if self.sync_manual_var:
+            host, port = self._sync_base_url_parts(str(payload["baseUrl"]))
+            self.sync_manual_var.set(
+                f"Manual pairing: IP {host}  Port {port}  Pair ID {payload['pairingId']}  Code {payload['pairingToken']}"
+            )
+        self._set_sync_payload_text(json.dumps(payload, indent=2))
+        self._render_sync_qr(payload)
+        self._add_sync_activity("Pairing code generated")
+        self._refresh_sync_panel()
+
+    def _revoke_sync_device(self, device_id: str):
+        if self.sync_server is None:
+            return
+        if self.sync_server.database.revoke_device(device_id):
+            self._log(f"[{human_time()}] Paired phone revoked.")
+            self._add_sync_activity("Paired phone revoked")
+        self._refresh_sync_panel()
+
+    def _open_sync_panel(self):
+        self._set_active_nav("Sync" if self.active_nav != "Devices" else "Devices")
+        self._hide_format_dropdown()
+        self._start_sync_server()
+        if self.sync_panel is not None:
+            self.sync_panel.lift()
+            self._refresh_sync_panel()
+            return
+
+        self.sync_status_var = ctk.StringVar(value="")
+        self.sync_detail_var = ctk.StringVar(value="")
+        self.sync_manual_var = ctk.StringVar(value="Manual pairing details will appear here.")
+        self.sync_last_scan_var = ctk.StringVar(value="Last scan: never")
+        self.sync_pair_code_var = ctk.StringVar(value="------")
+        self.sync_pair_detail_var = ctk.StringVar(value="Generate a code when the phone is ready.")
+
+        panel = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        self.sync_panel = panel
+
+        body = ctk.CTkFrame(panel, fg_color=SURFACE, corner_radius=12, width=720, height=590)
+        body.grid_propagate(False)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(5, weight=1)
+
+        header = ctk.CTkFrame(body, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 10))
+        header.grid_columnconfigure(0, weight=1)
+
+        title = ctk.CTkLabel(header, text="Local sync", font=("Segoe UI", 20, "bold"), anchor="w", text_color=TEXT)
+        title.grid(row=0, column=0, sticky="w")
+        close_btn = ctk.CTkButton(
+            header,
+            text="",
+            image=self.icons["close"],
+            width=38,
+            height=38,
+            corner_radius=0,
+            fg_color="transparent",
+            hover_color=SURFACE,
+            command=self._close_sync_panel,
+        )
+        close_btn.grid(row=0, column=1, sticky="e")
+
+        status_frame = ctk.CTkFrame(body, fg_color=SURFACE_ALT, corner_radius=8)
+        status_frame.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 10))
+        status_title = ctk.CTkLabel(status_frame, textvariable=self.sync_status_var, text_color=TEXT, font=("Segoe UI", 14, "bold"), anchor="w")
+        status_title.pack(anchor="w", padx=12, pady=(10, 2))
+        status_detail = ctk.CTkLabel(status_frame, textvariable=self.sync_detail_var, text_color=MUTED, font=("Segoe UI", 12), anchor="w")
+        status_detail.pack(anchor="w", padx=12, pady=(0, 10))
+        last_scan = ctk.CTkLabel(status_frame, textvariable=self.sync_last_scan_var, text_color=MUTED, font=("Segoe UI", 12), anchor="w")
+        last_scan.pack(anchor="w", padx=12, pady=(0, 10))
+
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 10))
+        scan_btn = ctk.CTkButton(
+            actions,
+            text="Scan Library",
+            width=120,
+            height=34,
+            corner_radius=8,
+            fg_color=SURFACE_ALT,
+            hover_color=SURFACE_HOVER,
+            text_color=TEXT,
+            command=self._scan_sync_library,
+        )
+        scan_btn.pack(side="left", padx=(0, 8))
+        test_btn = ctk.CTkButton(
+            actions,
+            text="Test Local Sync",
+            width=132,
+            height=34,
+            corner_radius=8,
+            fg_color=SURFACE_ALT,
+            hover_color=SURFACE_HOVER,
+            text_color=TEXT,
+            command=self._test_sync_server,
+        )
+        test_btn.pack(side="left", padx=(0, 8))
+        restart_btn = ctk.CTkButton(
+            actions,
+            text="Restart",
+            width=88,
+            height=34,
+            corner_radius=8,
+            fg_color=SURFACE_ALT,
+            hover_color=SURFACE_HOVER,
+            text_color=TEXT,
+            command=self._restart_sync_server,
+        )
+        restart_btn.pack(side="left", padx=(0, 8))
+        pair_btn = ctk.CTkButton(
+            actions,
+            text="Generate Pairing Code",
+            width=172,
+            height=34,
+            corner_radius=8,
+            fg_color=ACCENT,
+            hover_color=ACCENT_HOVER,
+            text_color=ACCENT_TEXT,
+            command=self._generate_sync_pairing,
+        )
+        pair_btn.pack(side="left")
+
+        pairing_frame = ctk.CTkFrame(body, fg_color=SURFACE_ALT, corner_radius=8)
+        pairing_frame.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 12))
+        pairing_frame.grid_columnconfigure(0, weight=1)
+
+        code_label = ctk.CTkLabel(pairing_frame, textvariable=self.sync_pair_code_var, text_color=TEXT, font=("Segoe UI", 28, "bold"))
+        code_label.grid(row=0, column=0, sticky="w", padx=12, pady=(12, 2))
+        code_detail = ctk.CTkLabel(
+            pairing_frame,
+            textvariable=self.sync_pair_detail_var,
+            text_color=MUTED,
+            font=("Segoe UI", 12),
+            anchor="w",
+            wraplength=410,
+        )
+        code_detail.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self.sync_manual_toggle_btn = ctk.CTkButton(
+            pairing_frame,
+            text="Manual Pairing",
+            width=128,
+            height=28,
+            corner_radius=8,
+            fg_color=ROW_BG,
+            hover_color=SURFACE_HOVER,
+            text_color=TEXT_SOFT,
+            command=self._toggle_sync_manual_details,
+        )
+        self.sync_manual_toggle_btn.grid(row=2, column=0, sticky="w", padx=12, pady=(0, 12))
+
+        self.sync_qr_label = ctk.CTkLabel(
+            pairing_frame,
+            text="Generating QR...",
+            width=136,
+            height=136,
+            corner_radius=8,
+            fg_color=ROW_BG,
+            text_color=MUTED,
+            font=("Segoe UI", 12),
+        )
+        self.sync_qr_label.grid(row=0, column=1, rowspan=3, sticky="ne", padx=(8, 12), pady=(12, 8))
+
+        self.sync_manual_frame = ctk.CTkFrame(pairing_frame, fg_color="transparent")
+        self.sync_manual_frame.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 12))
+        self.sync_manual_frame.grid_columnconfigure(0, weight=1)
+        manual_detail = ctk.CTkLabel(
+            self.sync_manual_frame,
+            textvariable=self.sync_manual_var,
+            text_color=TEXT_SOFT,
+            font=("Segoe UI", 12),
+            anchor="w",
+            wraplength=640,
+        )
+        manual_detail.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.sync_payload_box = ctk.CTkTextbox(
+            self.sync_manual_frame,
+            height=76,
+            corner_radius=8,
+            fg_color=ROW_BG,
+            border_color=BORDER,
+            border_width=1,
+            text_color=TEXT_SOFT,
+            font=("Consolas", 11),
+        )
+        self.sync_payload_box.grid(row=1, column=0, sticky="ew")
+        self._set_sync_payload_text("")
+        self.sync_manual_frame.grid_remove()
+
+        bottom_frame = ctk.CTkFrame(body, fg_color="transparent")
+        bottom_frame.grid(row=4, column=0, rowspan=2, sticky="nsew", padx=18, pady=(0, 18))
+        bottom_frame.grid_columnconfigure(0, weight=1)
+        bottom_frame.grid_columnconfigure(1, weight=1)
+        bottom_frame.grid_rowconfigure(1, weight=1)
+
+        devices_title = ctk.CTkLabel(bottom_frame, text="Paired phones", text_color=TEXT, font=("Segoe UI", 14, "bold"), anchor="w")
+        devices_title.grid(row=0, column=0, sticky="w", pady=(0, 4))
+        activity_title = ctk.CTkLabel(bottom_frame, text="Sync activity", text_color=TEXT, font=("Segoe UI", 14, "bold"), anchor="w")
+        activity_title.grid(row=0, column=1, sticky="w", padx=(10, 0), pady=(0, 4))
+
+        self.sync_devices_frame = ctk.CTkScrollableFrame(bottom_frame, fg_color=SURFACE_ALT, corner_radius=8)
+        self.sync_devices_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        self.sync_activity_frame = ctk.CTkScrollableFrame(bottom_frame, fg_color=SURFACE_ALT, corner_radius=8)
+        self.sync_activity_frame.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
+
+        panel.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+        body.place(relx=0.5, rely=0.5, anchor="center")
+        panel.lift()
+        self._refresh_sync_panel()
+        self._generate_sync_pairing()
+
     def _close_settings_window(self):
         if self.settings_panel is None:
             return
@@ -2221,6 +3456,7 @@ class App(ctk.CTk):
         widget.grid(row=row_index, column=1, sticky="ew", padx=(0, 18), pady=8)
 
     def _open_settings(self):
+        self._set_active_nav("Settings")
         self._hide_format_dropdown()
         if self.manager.has_active_jobs():
             messagebox.showinfo("Busy", "Settings can be changed after the current downloads finish.")
@@ -2371,6 +3607,7 @@ class App(ctk.CTk):
         self.audio_quality_var.set(settings["audio_quality"])
         self.video_quality_var.set(settings["video_quality"])
         self.out_dir_var.set(settings["download_dir"])
+        self._update_sync_library_dirs()
         self._update_input_hint()
 
         try:
@@ -3013,6 +4250,8 @@ class App(ctk.CTk):
         if not self.history_player:
             return
 
+        self._set_mini_track(file_path)
+        self._set_mini_playing(False)
         artwork_path = self._find_thumbnail(file_path)
         self._history_load_token += 1
         player_token = self._history_load_token
@@ -3047,6 +4286,7 @@ class App(ctk.CTk):
             if not self.history_player.winfo_manager():
                 return
             self.history_player.open_media(file_path, artwork_path=artwork_path)
+            self._set_mini_playing(self.history_player.playing)
 
         self.after(40, open_when_visible)
 
@@ -3055,6 +4295,7 @@ class App(ctk.CTk):
         if self.history_player:
             self.history_player.close_media()
             self.history_player.grid_remove()
+            self._set_mini_playing(False)
         if self.history_list_frame:
             self.history_list_frame.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 20))
         if self.history_context_stack:
@@ -3136,6 +4377,7 @@ class App(ctk.CTk):
         self._load_history_context(context)
 
     def _show_history(self):
+        self._set_active_nav("Library")
         self._hide_format_dropdown()
         directory = (self.out_dir_var.get() or "").strip() or default_download_dir()
 

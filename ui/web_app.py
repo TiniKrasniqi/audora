@@ -8,8 +8,10 @@ import mimetypes
 import os
 import queue
 import shutil
+import subprocess
 import sys
 import threading
+import time
 from dataclasses import asdict
 from datetime import datetime
 from functools import partial
@@ -35,7 +37,7 @@ AUDIO_QUALITIES = {
     "320 kbps": "320",
 }
 
-VIDEO_QUALITIES = ["480p", "720p", "1080p", "1440p", "2160p (4K)"]
+VIDEO_QUALITIES = ["480p", "720p", "1080p", "1440p", "2160p"]
 MEDIA_EXTENSIONS = (".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg", ".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v")
 SETTINGS_FILE_NAME = "settings.json"
 
@@ -77,6 +79,8 @@ def _clean_settings(raw_settings: Optional[Dict]) -> Dict[str, str]:
 
     if settings.get("audio_quality") not in AUDIO_QUALITIES:
         settings["audio_quality"] = defaults["audio_quality"]
+    if settings.get("video_quality") == "2160p (4K)":
+        settings["video_quality"] = "2160p"
     if settings.get("video_quality") not in VIDEO_QUALITIES:
         settings["video_quality"] = defaults["video_quality"]
 
@@ -135,6 +139,22 @@ def _format_eta(seconds: Optional[int]) -> str:
     if hours:
         return f"{hours:02d}:{minutes:02d}:{sec:02d}"
     return f"{minutes:02d}:{sec:02d}"
+
+
+def _empty_stats() -> dict:
+    return {
+        "usedBytes": 0,
+        "totalBytes": 0,
+        "used": "0 B",
+        "total": "0 B",
+        "percent": 0,
+        "items": 0,
+        "tracks": 0,
+        "videos": 0,
+        "playlists": 0,
+        "downloaded": 0,
+        "sessions": 0,
+    }
 
 
 def _timestamp(mtime: Optional[float]) -> str:
@@ -303,6 +323,17 @@ class AudoraWebApi:
         self._last_qr = ""
         self._last_pairing_payload: Optional[dict] = None
         self._media_base_url = ""
+        self._library_snapshot = {
+            "directory": "",
+            "history": [],
+            "library": [],
+            "stats": _empty_stats(),
+            "updatedAt": 0.0,
+            "version": 0,
+        }
+        self._library_refreshing = False
+        self._library_dirty = True
+        self._library_refresh_token = 0
 
         self.manager = DownloadManager(
             self._enqueue_log,
@@ -367,32 +398,42 @@ class AudoraWebApi:
         downloaded = int(data.get("downloaded") or 0)
         total = int(data.get("total") or 0)
         data["downloadedText"] = f"{_format_bytes(downloaded)} of {_format_bytes(total)}" if total else _format_bytes(downloaded) if downloaded else ""
-        data["mode"] = "Audio" if self.settings.get("audio_quality") else "Download"
+        data["mode"] = data.get("mode") or "Download"
         return data
 
     def _enqueue_progress(self, progress: DownloadProgress) -> None:
         item = self._progress_to_dict(progress)
+        should_refresh_library = False
         with self._lock:
             job_id = item.get("job_id")
             if job_id:
                 current = self._jobs.get(job_id, {})
                 current.update(item)
                 self._jobs[job_id] = current
+                if item.get("status") == "finished" and item.get("message") == "all_done":
+                    self._mark_library_dirty()
+                    should_refresh_library = True
             else:
                 self._terminal_status = item
-                if item.get("status") == "finished" and item.get("message") == "all_done":
-                    for job in self._jobs.values():
-                        if job.get("status") not in ("error", "stopped"):
-                            job["status"] = "finished"
-                            job["percent"] = 100
+                terminal_status = str(item.get("status") or "").lower()
+                if terminal_status in {"finished", "stopped", "error"}:
+                    if terminal_status == "finished" and item.get("message") == "all_done":
+                        for job in self._jobs.values():
+                            if job.get("status") not in ("error", "stopped"):
+                                job["status"] = "finished"
+                                job["percent"] = 100
+                    self._mark_library_dirty()
+                    should_refresh_library = True
+        if should_refresh_library:
+            self._refresh_library_now(self.settings.get("download_dir") or default_download_dir())
         self._event_queue.put({"type": "progress", "progress": item})
 
-    def _history_entries(self, directory: str, include_folders: bool = True, limit: int = 80) -> List[dict]:
+    def _history_entries(self, directory: str, include_folders: bool = True, limit: Optional[int] = None) -> List[dict]:
         entries: List[dict] = []
         try:
             with os.scandir(directory) as iterator:
                 for entry in iterator:
-                    if len(entries) >= limit:
+                    if limit is not None and len(entries) >= limit:
                         break
                     try:
                         path = entry.path
@@ -421,11 +462,12 @@ class AudoraWebApi:
                                 }
                             )
                         elif include_folders and entry.is_dir():
-                            children = self._history_entries(path, include_folders=False, limit=200)
+                            children = self._history_entries(path, include_folders=False, limit=None)
                             if not children:
                                 continue
                             stat = entry.stat()
                             latest_child = max((child.get("mtime") or 0) for child in children)
+                            thumbnail_uri = next((child.get("thumbnailUri") for child in children if child.get("thumbnailUri")), "")
                             size_bytes = sum(self._folder_size(path))
                             entries.append(
                                 {
@@ -438,7 +480,8 @@ class AudoraWebApi:
                                     "timestamp": _timestamp(max(stat.st_mtime, latest_child)),
                                     "count": len(children),
                                     "size": _format_bytes(size_bytes),
-                                    "children": children[:40],
+                                    "thumbnailUri": thumbnail_uri,
+                                    "children": children,
                                 }
                             )
                     except OSError:
@@ -482,13 +525,153 @@ class AudoraWebApi:
             "sessions": len(history),
         }
 
-    def _library_entries(self, directory: str, limit: int = 80) -> List[dict]:
+    def _build_library_snapshot(self, directory: str) -> dict:
+        history = self._history_entries(directory)
+        library = self._library_entries(directory)
+        return {
+            "directory": directory,
+            "history": history,
+            "library": library,
+            "stats": self._library_stats(directory, history, library),
+            "updatedAt": time.time(),
+        }
+
+    def _mark_library_dirty(self) -> None:
+        with self._lock:
+            self._library_dirty = True
+
+    def _snapshot_for_state(self, directory: str) -> dict:
+        with self._lock:
+            snapshot = dict(self._library_snapshot)
+            refreshing = self._library_refreshing
+            dirty = self._library_dirty or snapshot.get("directory") != directory
+            version = int(snapshot.get("version") or 0)
+        if dirty:
+            self._ensure_library_refresh(directory)
+        if snapshot.get("directory") != directory:
+            snapshot = {
+                "directory": directory,
+                "history": [],
+                "library": [],
+                "stats": _empty_stats(),
+                "updatedAt": 0.0,
+                "version": version,
+            }
+        snapshot["refreshing"] = refreshing or dirty
+        return snapshot
+
+    def _ensure_library_refresh(self, directory: Optional[str] = None, force: bool = False) -> None:
+        directory = directory or (self.settings.get("download_dir") or default_download_dir()).strip()
+        with self._lock:
+            snapshot_dir = self._library_snapshot.get("directory")
+            should_refresh = force or self._library_dirty or snapshot_dir != directory
+            if self._library_refreshing or not should_refresh:
+                return
+            self._library_refreshing = True
+            self._library_dirty = False
+            self._library_refresh_token += 1
+            token = self._library_refresh_token
+
+        def run() -> None:
+            try:
+                snapshot = self._build_library_snapshot(directory)
+            except Exception as exc:  # pylint: disable=broad-except
+                self._enqueue_log(f"[{human_time()}] Library refresh failed: {exc}")
+                with self._lock:
+                    if token == self._library_refresh_token:
+                        self._library_refreshing = False
+                        self._library_dirty = True
+                return
+            with self._lock:
+                if token != self._library_refresh_token:
+                    return
+                version = int(self._library_snapshot.get("version") or 0) + 1
+                self._library_snapshot = {**snapshot, "version": version}
+                self._library_refreshing = False
+            self._event_queue.put({"type": "library", "version": version})
+
+        threading.Thread(target=run, name="AudoraLibrarySnapshot", daemon=True).start()
+
+    def _refresh_library_now(self, directory: Optional[str] = None) -> None:
+        directory = directory or (self.settings.get("download_dir") or default_download_dir()).strip()
+        with self._lock:
+            self._library_refresh_token += 1
+            token = self._library_refresh_token
+            self._library_refreshing = True
+            self._library_dirty = False
+        try:
+            snapshot = self._build_library_snapshot(directory)
+        except Exception as exc:  # pylint: disable=broad-except
+            self._enqueue_log(f"[{human_time()}] Library refresh failed: {exc}")
+            with self._lock:
+                if token == self._library_refresh_token:
+                    self._library_refreshing = False
+                    self._library_dirty = True
+            return
+        with self._lock:
+            if token != self._library_refresh_token:
+                return
+            version = int(self._library_snapshot.get("version") or 0) + 1
+            self._library_snapshot = {**snapshot, "version": version}
+            self._library_refreshing = False
+            self._library_dirty = False
+        self._event_queue.put({"type": "library", "version": version})
+
+    def _remove_deleted_from_snapshot(self, path: str) -> None:
+        if not path:
+            return
+        with self._lock:
+            snapshot = dict(self._library_snapshot)
+            history = list(snapshot.get("history") or [])
+            library = list(snapshot.get("library") or [])
+            if not history and not library:
+                self._library_dirty = True
+                return
+
+            def keep_entry(entry: dict) -> bool:
+                entry_path = entry.get("path") or ""
+                if entry_path and _safe_joined(path, entry_path):
+                    return False
+                if entry_path and os.path.normcase(os.path.abspath(entry_path)) == os.path.normcase(os.path.abspath(path)):
+                    return False
+                return True
+
+            updated_history = []
+            for entry in history:
+                entry_path = entry.get("path") or ""
+                if entry_path and (
+                    os.path.normcase(os.path.abspath(entry_path)) == os.path.normcase(os.path.abspath(path))
+                    or _safe_joined(path, entry_path)
+                ):
+                    continue
+                children = entry.get("children")
+                if isinstance(children, list):
+                    next_children = [child for child in children if keep_entry(child)]
+                    if entry.get("type") == "folder" and not next_children:
+                        continue
+                    entry = {**entry, "children": next_children, "count": len(next_children)}
+                updated_history.append(entry)
+
+            updated_library = [entry for entry in library if keep_entry(entry)]
+            stats = self._library_stats(snapshot.get("directory") or self.settings.get("download_dir") or default_download_dir(), updated_history, updated_library)
+            version = int(snapshot.get("version") or 0) + 1
+            self._library_snapshot = {
+                **snapshot,
+                "history": updated_history,
+                "library": updated_library,
+                "stats": stats,
+                "updatedAt": time.time(),
+                "version": version,
+            }
+            self._library_dirty = True
+
+    def _library_entries(self, directory: str, limit: Optional[int] = None) -> List[dict]:
         rows: List[dict] = []
         if not directory or not os.path.isdir(directory):
             return rows
         for root, _dirs, files in os.walk(directory):
             for filename in files:
-                if len(rows) >= limit:
+                if limit is not None and len(rows) >= limit:
                     return rows
                 if not _is_media_file(filename):
                     continue
@@ -518,6 +701,7 @@ class AudoraWebApi:
                         "thumbnailUri": _image_data_uri(thumb),
                     }
                 )
+        rows.sort(key=lambda item: item.get("mtime") or 0, reverse=True)
         return rows
 
     def _sync_state(self) -> dict:
@@ -602,9 +786,7 @@ class AudoraWebApi:
     # pywebview API -----------------------------------------------------
     def get_state(self) -> dict:
         directory = (self.settings.get("download_dir") or "").strip() or default_download_dir()
-        history = self._history_entries(directory)
-        library = self._library_entries(directory)
-        stats = self._library_stats(directory, history, library)
+        snapshot = self._snapshot_for_state(directory)
         with self._lock:
             downloads = {
                 "jobs": list(self._jobs.values()),
@@ -613,9 +795,12 @@ class AudoraWebApi:
             }
         return {
             "settings": self.settings,
-            "history": history,
-            "library": library,
-            "stats": stats,
+            "history": snapshot["history"],
+            "library": snapshot["library"],
+            "stats": snapshot["stats"],
+            "libraryRefreshing": snapshot.get("refreshing", False),
+            "libraryUpdatedAt": snapshot.get("updatedAt", 0.0),
+            "libraryVersion": snapshot.get("version", 0),
             "downloads": downloads,
             "sync": self._sync_state(),
             "qr": self._last_qr,
@@ -633,8 +818,14 @@ class AudoraWebApi:
         with self._lock:
             jobs = list(self._jobs.values())
             logs = list(self._logs[-20:])
+            library_version = int(self._library_snapshot.get("version") or 0)
+            library_refreshing = self._library_refreshing
+        library_changed = any(event.get("type") == "library" for event in events if isinstance(event, dict))
         return {
             "changed": changed,
+            "libraryChanged": library_changed,
+            "libraryVersion": library_version,
+            "libraryRefreshing": library_refreshing,
             "events": events,
             "jobs": jobs,
             "logs": logs,
@@ -676,15 +867,21 @@ class AudoraWebApi:
 
     def stop_download(self) -> dict:
         self.manager.stop_all()
+        self._mark_library_dirty()
+        self._refresh_library_now(self.settings.get("download_dir") or default_download_dir())
         return {"ok": True, "message": "Download stopped."}
 
     def save_settings(self, settings: dict) -> dict:
         incoming = dict(self.settings)
         if isinstance(settings, dict):
             incoming.update(settings)
+        old_directory = self.settings.get("download_dir")
         self.settings = _save_settings(incoming)
         self.manager.set_max_workers(int(self.settings.get("parallel_downloads") or 3))
         self._update_sync_dirs()
+        if self.settings.get("download_dir") != old_directory:
+            self._mark_library_dirty()
+            self._ensure_library_refresh(self.settings.get("download_dir") or default_download_dir())
         return {"ok": True, "message": "Settings saved.", "settings": self.settings}
 
     def choose_download_dir(self) -> dict:
@@ -700,6 +897,8 @@ class AudoraWebApi:
                 self.settings["download_dir"] = os.fspath(path)
                 self.settings = _save_settings(self.settings)
                 self._update_sync_dirs()
+                self._mark_library_dirty()
+                self._ensure_library_refresh(self.settings["download_dir"])
                 return {"ok": True, "path": self.settings["download_dir"]}
         except Exception as exc:  # pylint: disable=broad-except
             return {"ok": False, "error": str(exc)}
@@ -714,9 +913,9 @@ class AudoraWebApi:
             if sys.platform.startswith("win"):
                 os.startfile(target)  # pylint: disable=no-member
             elif sys.platform == "darwin":
-                os.system(f'open "{target}"')
+                subprocess.Popen(["open", target])
             else:
-                os.system(f'xdg-open "{target}"')
+                subprocess.Popen(["xdg-open", target])
             return {"ok": True}
         except Exception as exc:  # pylint: disable=broad-except
             return {"ok": False, "error": str(exc)}
@@ -729,9 +928,9 @@ class AudoraWebApi:
             if sys.platform.startswith("win"):
                 os.startfile(path)  # pylint: disable=no-member
             elif sys.platform == "darwin":
-                os.system(f'open "{path}"')
+                subprocess.Popen(["open", path])
             else:
-                os.system(f'xdg-open "{path}"')
+                subprocess.Popen(["xdg-open", path])
             return {"ok": True}
         except Exception as exc:  # pylint: disable=broad-except
             return {"ok": False, "error": str(exc)}
@@ -739,10 +938,13 @@ class AudoraWebApi:
     def delete_path(self, payload: dict) -> dict:
         path = str((payload or {}).get("path") or "").strip()
         root = (self.settings.get("download_dir") or default_download_dir()).strip()
-        if not path or not os.path.exists(path):
-            return {"ok": False, "error": "The file no longer exists."}
+        if not path:
+            return {"ok": False, "error": "No path selected."}
         if not _safe_joined(root, path) or os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(root)):
             return {"ok": False, "error": "Audora will only delete items inside the download folder."}
+        if not os.path.exists(path):
+            self._remove_deleted_from_snapshot(path)
+            return {"ok": True, "missing": True, "message": "The file was already deleted."}
         try:
             if os.path.isdir(path):
                 shutil.rmtree(path)
@@ -750,6 +952,7 @@ class AudoraWebApi:
                 for target in [path] + _sidecars_for_file(path):
                     if os.path.exists(target):
                         os.remove(target)
+            self._remove_deleted_from_snapshot(path)
             return {"ok": True}
         except OSError as exc:
             return {"ok": False, "error": str(exc)}
@@ -768,6 +971,8 @@ class AudoraWebApi:
         if not self._start_sync_server() or self.sync_server is None:
             return {"ok": False, "message": self.sync_error or "Sync server is offline."}
         self._update_sync_dirs()
+        self._mark_library_dirty()
+        self._ensure_library_refresh(force=True)
 
         def run() -> None:
             try:

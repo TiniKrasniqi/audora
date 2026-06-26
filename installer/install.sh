@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bootstraps the YouTube Downloader application on Unix-like systems.
+# Bootstraps the Audora application on Unix-like systems.
 # The script ensures Python is available, creates a virtual environment,
 # installs the dependencies and generates a helper script for launching
 # the application.

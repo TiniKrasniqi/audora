@@ -31,6 +31,7 @@ class DownloadProgress:
     item_count: Optional[int] = None
     job_id: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    mode: str = ""
 
 
 class YTDLogger:
@@ -98,6 +99,7 @@ class YTAudioDownloader:
                 item_index=int(playlist_index) if playlist_index is not None else None,
                 item_count=int(playlist_count) if playlist_count else None,
                 job_id=self.job_id,
+                mode="Video" if self._mode == "video" else "Audio",
             )
             self._last_title = progress.title
             self._last_item_index = progress.item_index
@@ -119,6 +121,7 @@ class YTAudioDownloader:
                 item_index=int(playlist_index) if playlist_index is not None else None,
                 item_count=int(playlist_count) if playlist_count else None,
                 job_id=self.job_id,
+                mode="Video" if self._mode == "video" else "Audio",
             )
             self._last_title = progress.title
             self._last_item_index = progress.item_index
@@ -186,7 +189,7 @@ class YTAudioDownloader:
         self._log_js_runtime_warning_once()
 
         try:
-            self.progress(DownloadProgress(status="downloading", message="preparing", job_id=self.job_id))
+            self.progress(DownloadProgress(status="downloading", message="preparing", job_id=self.job_id, mode="Audio"))
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
             if not self.stop_event.is_set():
@@ -199,19 +202,20 @@ class YTAudioDownloader:
                     item_index=self._last_item_index,
                     item_count=self._last_item_count,
                     job_id=self.job_id,
+                    mode="Audio",
                 ))
 
         except DownloadCancelled as e:
             self.log(f"[{human_time()}] ⏹ Stopped: {e}")
-            self.progress(DownloadProgress(status="stopped", message=str(e), job_id=self.job_id))
+            self.progress(DownloadProgress(status="stopped", message=str(e), job_id=self.job_id, mode="Audio"))
 
         except DownloadError as e:
             self.log(f"[{human_time()}] ❌ Download error: {e}")
-            self.progress(DownloadProgress(status="error", message=str(e), job_id=self.job_id))
+            self.progress(DownloadProgress(status="error", message=str(e), job_id=self.job_id, mode="Audio"))
 
         except Exception as e:
             self.log(f"[{human_time()}] 💥 Unexpected error: {e}")
-            self.progress(DownloadProgress(status="error", message=str(e), job_id=self.job_id))
+            self.progress(DownloadProgress(status="error", message=str(e), job_id=self.job_id, mode="Audio"))
 
     def download_video(self, url: str, out_dir: str, quality: str = "720p", outtmpl: Optional[str] = None):
         self._mode = "video"
@@ -221,7 +225,7 @@ class YTAudioDownloader:
         self._log_js_runtime_warning_once()
 
         try:
-            self.progress(DownloadProgress(status="downloading", message="preparing", job_id=self.job_id))
+            self.progress(DownloadProgress(status="downloading", message="preparing", job_id=self.job_id, mode="Video"))
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
             if not self.stop_event.is_set():
@@ -234,13 +238,14 @@ class YTAudioDownloader:
                     item_index=self._last_item_index,
                     item_count=self._last_item_count,
                     job_id=self.job_id,
+                    mode="Video",
                 ))
         except DownloadCancelled as e:
             self.log(f"[{human_time()}] ⏹ Stopped: {e}")
-            self.progress(DownloadProgress(status="stopped", message=str(e), job_id=self.job_id))
+            self.progress(DownloadProgress(status="stopped", message=str(e), job_id=self.job_id, mode="Video"))
         except Exception as e:
             self.log(f"[{human_time()}] 💥 Video error: {e}")
-            self.progress(DownloadProgress(status="error", message=str(e), job_id=self.job_id))
+            self.progress(DownloadProgress(status="error", message=str(e), job_id=self.job_id, mode="Video"))
 
 
     def build_video_opts(self, url: str, out_dir: str, quality: str = "720p", outtmpl: Optional[str] = None):

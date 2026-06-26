@@ -1,5 +1,5 @@
-YouTube Downloader Installer
-============================
+Audora Installer
+================
 
 This package bundles the application source code together with helper scripts
 that automate the installation process on both Windows and Unix-like systems.
@@ -15,8 +15,8 @@ Building the installer
        pip install pyinstaller
 4. From the project root, run:
        python installer/build.py
-5. The archive "dist/youtube_downloader_installer.zip" will be created. On
-   Windows this build step also bundles a `youtube-downloader.exe` inside the
+5. The archive "dist/audora_installer.zip" will be created. On
+   Windows this build step also bundles an `audora.exe` inside the
    `app/` directory of the archive.
 
 Note: the build script must be executed on Windows to produce the standalone

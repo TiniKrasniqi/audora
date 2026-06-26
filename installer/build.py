@@ -10,8 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST_DIR = ROOT / "dist"
-ARCHIVE_NAME = "youtube_downloader_installer.zip"
-EXECUTABLE_STEM = "youtube-downloader"
+ARCHIVE_NAME = "audora_installer.zip"
+EXECUTABLE_STEM = "audora"
 EXECUTABLE_NAME = f"{EXECUTABLE_STEM}.exe"
 
 APP_ITEMS = [
@@ -126,7 +126,7 @@ def build_archive() -> Path:
     archive_path = DIST_DIR / ARCHIVE_NAME
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        build_root = Path(tmp_dir) / "youtube_downloader_installer"
+        build_root = Path(tmp_dir) / "audora_installer"
         build_root.mkdir()
 
         copy_app_payload(build_root)

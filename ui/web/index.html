@@ -4,14 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Audora</title>
-    <link rel="preconnect" href="https://unpkg.com" />
     <link
       rel="stylesheet"
-      href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css"
+      href="vendor/phosphor/regular/style.css"
     />
     <link
       rel="stylesheet"
-      href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css"
+      href="vendor/phosphor/fill/style.css"
     />
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -38,7 +37,7 @@
           <label class="search-pill">
             <i class="ph ph-magnifying-glass"></i>
             <input id="globalSearch" type="search" placeholder="Search tracks, artists, albums..." />
-            <kbd>⌘ K</kbd>
+            <kbd>Ctrl K</kbd>
           </label>
           <div class="topbar-actions">
             <button class="status-pill" data-action="open-devices">
@@ -46,7 +45,7 @@
               <span id="syncStatusText">Local sync online</span>
               <i class="ph ph-caret-down"></i>
             </button>
-            <button class="profile-pill">
+            <button class="profile-pill" disabled title="Local profile is not configurable yet">
               <img src="assets/avatar-alex.png" alt="" />
               <span>Alex Morgan</span>
               <i class="ph ph-caret-down"></i>
@@ -59,20 +58,24 @@
 
       <footer class="mini-player">
         <div class="now-playing">
-          <img id="miniArt" src="assets/album-moment-apart.png" alt="" />
+          <button class="mini-art-button" data-action="show-video-player" title="Show video player">
+            <img id="miniArt" src="assets/album-moment-apart.png" alt="" />
+            <video id="miniVideoPreview" muted playsinline preload="metadata" hidden></video>
+            <span class="video-pop-indicator"><i class="ph ph-arrows-out-simple"></i></span>
+          </button>
           <div>
             <strong id="miniTitle">Nothing playing</strong>
             <span id="miniArtist">No media selected</span>
           </div>
-          <button class="icon-button" title="Favorite"><i class="ph ph-heart"></i></button>
+          <button class="icon-button" title="Favorites are not available yet" disabled><i class="ph ph-heart"></i></button>
         </div>
         <div class="player-center">
           <div class="player-controls">
-            <button class="icon-button" title="Shuffle"><i class="ph ph-shuffle"></i></button>
-            <button class="icon-button" title="Previous"><i class="ph-fill ph-skip-back"></i></button>
+            <button class="icon-button" data-action="toggle-shuffle" title="Shuffle"><i class="ph ph-shuffle"></i></button>
+            <button class="icon-button" data-action="player-prev" title="Previous"><i class="ph-fill ph-skip-back"></i></button>
             <button class="play-main" id="miniPlay" title="Play or pause"><i class="ph-fill ph-pause"></i></button>
-            <button class="icon-button" title="Next"><i class="ph-fill ph-skip-forward"></i></button>
-            <button class="icon-button" title="Repeat"><i class="ph ph-repeat"></i></button>
+            <button class="icon-button" data-action="player-next" title="Next"><i class="ph-fill ph-skip-forward"></i></button>
+            <button class="icon-button" data-action="toggle-repeat" title="Repeat"><i class="ph ph-repeat"></i></button>
           </div>
           <div class="player-progress">
             <span id="playerElapsed">0:00</span>
@@ -83,7 +86,7 @@
         <div class="volume-cluster">
           <i class="ph ph-speaker-high"></i>
           <input type="range" min="0" max="100" value="37" />
-          <button class="icon-button" title="Queue"><i class="ph ph-list-bullets"></i></button>
+          <button class="icon-button" title="Queue is not available yet" disabled><i class="ph ph-list-bullets"></i></button>
         </div>
       </footer>
     </div>

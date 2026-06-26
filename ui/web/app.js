@@ -29,14 +29,24 @@ const state = {
   sync: { online: false, baseUrl: "", host: "", port: "5353", devices: [], activity: [], trackCount: 0 },
   stats: { used: "0 B", total: "0 B", percent: 0, items: 0, tracks: 0, videos: 0, playlists: 0, downloaded: 0, sessions: 0 },
   qr: "",
+  searchQuery: "",
+  libraryRefreshing: false,
+  libraryVersion: 0,
   selectedHistoryIndex: 0,
   selectedTrackIndex: 0,
   selectedLibraryIndex: 0,
   libraryFilter: "All",
   libraryPlaylistHistoryIndex: null,
-  player: { playing: false, current: null },
+  player: { playing: false, current: null, shuffle: false, repeat: false },
+  deleteStates: {},
+  parallelMenuOpen: false,
+  settingMenus: {},
+  qrLoading: false,
   activeDownloadTitle: "Playlist Download",
 };
+
+const AUDIO_QUALITIES = ["128 kbps", "192 kbps", "256 kbps", "320 kbps"];
+const VIDEO_QUALITIES = ["480p", "720p", "1080p", "1440p", "2160p"];
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -90,10 +100,70 @@ function isSamePath(path, target) {
   return normalizePathValue(path) === normalizePathValue(target);
 }
 
+function deleteKey(path) {
+  return normalizePathValue(path);
+}
+
+function deleteStateFor(path) {
+  return state.deleteStates[deleteKey(path)]?.status || "";
+}
+
+function setDeleteState(path, status) {
+  const key = deleteKey(path);
+  if (!key) return;
+  state.deleteStates[key] = { ...(state.deleteStates[key] || {}), status };
+}
+
+function clearDeleteState(path) {
+  const key = deleteKey(path);
+  if (key) delete state.deleteStates[key];
+}
+
+function hasVisibleDeleteState() {
+  return Object.values(state.deleteStates).some((item) => ["deleting", "deleted"].includes(item?.status));
+}
+
+function decorateEntryDeleteState(entry) {
+  const deleteState = deleteStateFor(entry.path);
+  const children = Array.isArray(entry.children) ? entry.children.map(decorateEntryDeleteState) : entry.children;
+  return { ...entry, deleteState, children };
+}
+
+function searchableText(item) {
+  return [
+    item.title,
+    item.name,
+    item.artist,
+    item.type,
+    item.mediaType,
+    item.format,
+    item.timestamp,
+    item.path,
+    ...(Array.isArray(item.children) ? item.children.flatMap((child) => [child.title, child.name, child.artist, child.format]) : []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function matchesSearch(item) {
+  const query = String(state.searchQuery || "").trim().toLowerCase();
+  if (!query) return true;
+  return query.split(/\s+/).every((part) => searchableText(item).includes(part));
+}
+
+function indexedHistoryEntries() {
+  return state.history.map((entry, historyIndex) => ({ ...entry, historyIndex })).filter(matchesSearch);
+}
+
+function indexedTracks() {
+  return state.tracks.map((track, trackIndex) => ({ ...track, trackIndex })).filter(matchesSearch);
+}
+
 function historyPlaylistEntries() {
   return state.history
     .map((entry, historyIndex) => ({ ...entry, historyIndex }))
-    .filter((entry) => entry.type === "folder");
+    .filter((entry) => entry.type === "folder" && matchesSearch(entry));
 }
 
 function libraryItems() {
@@ -111,7 +181,7 @@ function libraryItems() {
       type: child.mediaType || child.type || "Audio",
       art: child.thumbnailUri || child.art || activePlaylist.art || coverFor(childIndex),
       status: child.status || "Downloaded",
-    })).filter(libraryFilterMatch);
+    })).filter((item) => libraryFilterMatch(item) && matchesSearch(item));
   }
 
   const playlists = historyPlaylistEntries().map((entry) => ({
@@ -119,7 +189,8 @@ function libraryItems() {
     historyIndex: entry.historyIndex,
     title: entry.title || entry.name || "Untitled playlist",
     artist: "Playlist Folder",
-    art: entry.art || asset("album-party.png"),
+    art: artworkFor(entry, entry.historyIndex, asset("album-party.png")),
+    thumbnailUri: entry.thumbnailUri || firstChildArt(entry.children),
     count: entry.count || 0,
     size: entry.size || "",
     format: "Playlist",
@@ -130,9 +201,9 @@ function libraryItems() {
   }));
   const playlistFolders = playlists.map((entry) => entry.path).filter(Boolean);
   const tracks = state.tracks
-    .filter((track) => !playlistFolders.some((folder) => isPathInside(track.path, folder)))
-    .map((track, trackIndex) => ({ ...track, kind: "track", trackIndex }));
-  return [...playlists, ...tracks].filter(libraryFilterMatch);
+    .map((track, trackIndex) => ({ ...track, kind: "track", trackIndex }))
+    .filter((track) => !playlistFolders.some((folder) => isPathInside(track.path, folder)));
+  return [...playlists, ...tracks].filter((item) => libraryFilterMatch(item) && matchesSearch(item));
 }
 
 function libraryFilterMatch(item) {
@@ -185,16 +256,48 @@ function coverFor(index, fallback = "album-moment-apart.png") {
   return asset(covers[index % covers.length] || fallback);
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function firstChildArt(children) {
+  if (!Array.isArray(children)) return "";
+  const child = children.find((item) => item?.thumbnailUri || item?.art);
+  return child?.thumbnailUri || child?.art || "";
+}
+
+function artworkFor(item, index = 0, fallback = "") {
+  return item?.thumbnailUri || item?.art || firstChildArt(item?.children) || fallback || coverFor(index);
+}
+
 function normalizeBackend(data) {
   if (!data || typeof data !== "object") return;
   if (data.settings) state.settings = { ...state.settings, ...data.settings };
   if (data.stats) state.stats = { ...state.stats, ...data.stats };
+  const incomingRefreshing = Boolean(data.libraryRefreshing);
+  const incomingVersion = Number(data.libraryVersion || state.libraryVersion || 0);
+  const currentHasLibraryData = state.history.length > 0 || state.tracks.length > 0;
+  const incomingHistoryEmpty = Array.isArray(data.history) && data.history.length === 0;
+  const incomingLibraryEmpty = Array.isArray(data.library) && data.library.length === 0;
+  const holdVisibleLibrary =
+    incomingRefreshing &&
+    currentHasLibraryData &&
+    incomingVersion <= state.libraryVersion &&
+    incomingHistoryEmpty &&
+    incomingLibraryEmpty;
+  const holdDeleteLifecycle = hasVisibleDeleteState() && currentHasLibraryData;
   if (Array.isArray(data.history)) {
-    state.history = data.history.map((entry, index) => ({ ...entry, art: entry.thumbnailUri || coverFor(index) }));
+    if (!holdVisibleLibrary && !holdDeleteLifecycle) {
+      state.history = data.history.map((entry, index) => decorateEntryDeleteState({ ...entry, art: artworkFor(entry, index) }));
+    }
   }
   if (Array.isArray(data.library)) {
-    state.tracks = data.library.map((entry, index) => ({ ...entry, art: entry.thumbnailUri || coverFor(index) }));
+    if (!holdVisibleLibrary && !holdDeleteLifecycle) {
+      state.tracks = data.library.map((entry, index) => ({ ...entry, deleteState: deleteStateFor(entry.path), art: artworkFor(entry, index) }));
+    }
   }
+  state.libraryRefreshing = incomingRefreshing;
+  state.libraryVersion = incomingVersion;
   const startupGrace = isDownloadStartupGrace();
   if (data.downloads && typeof data.downloads.active === "boolean") {
     state.downloadsActive = data.downloads.active || startupGrace;
@@ -279,12 +382,44 @@ function playlistProgressPercent(list, total) {
 
 function updateChrome() {
   $("#syncStatusText").textContent = state.sync.online ? "Local sync online" : "Local sync offline";
+  const search = $("#globalSearch");
+  if (search && document.activeElement !== search && search.value !== state.searchQuery) {
+    search.value = state.searchQuery;
+  }
   const active = state.player.current || state.tracks[state.selectedTrackIndex] || state.tracks[0];
+  const isCurrentVideo = isVideoItem(active);
   $("#miniTitle").textContent = active?.title || "Nothing playing";
   $("#miniArtist").textContent = active?.artist || "No media selected";
   $("#miniArt").src = active?.art || asset("album-moment-apart.png");
+  const miniArtButton = $(".mini-art-button");
+  const miniPreview = $("#miniVideoPreview");
+  if (miniArtButton) miniArtButton.classList.toggle("video-active", Boolean(isCurrentVideo && active?.uri));
+  if (miniPreview) {
+    const media = $("#mediaPlayer");
+    if (isCurrentVideo && media?.src) {
+      if (miniPreview.src !== media.src) miniPreview.src = media.src;
+      miniPreview.hidden = false;
+      miniPreview.muted = true;
+      if (Number.isFinite(media.currentTime) && Math.abs((miniPreview.currentTime || 0) - media.currentTime) > 0.75) {
+        try {
+          miniPreview.currentTime = media.currentTime;
+        } catch (_error) {
+          // Some engines reject currentTime until metadata is ready; the next tick catches up.
+        }
+      }
+      if (!media.paused && miniPreview.paused) miniPreview.play().catch(() => {});
+      if (media.paused && !miniPreview.paused) miniPreview.pause();
+    } else {
+      miniPreview.pause();
+      miniPreview.removeAttribute("src");
+      miniPreview.load();
+      miniPreview.hidden = true;
+    }
+  }
   const playIcon = $("#miniPlay i");
   if (playIcon) playIcon.className = state.player.playing ? "ph-fill ph-pause" : "ph-fill ph-play";
+  $$('[data-action="toggle-shuffle"]').forEach((button) => button.classList.toggle("active", state.player.shuffle));
+  $$('[data-action="toggle-repeat"]').forEach((button) => button.classList.toggle("active", state.player.repeat));
   updatePlayerProgress();
   const storageCard = $(".storage-card");
   if (storageCard) {
@@ -349,6 +484,8 @@ async function playMediaItem(item) {
     uri: source,
     type: item.mediaType || item.type || "",
   };
+  const trackIndex = findTrackIndexByPath(item.path);
+  if (trackIndex >= 0) state.selectedTrackIndex = trackIndex;
   updateChrome();
   if (!media || !source) {
     state.player.playing = false;
@@ -369,6 +506,42 @@ async function playMediaItem(item) {
     toast("Audora could not play this file inside the app.");
   }
   updateChrome();
+}
+
+function playableTracks() {
+  return state.tracks.filter((track) => track.uri);
+}
+
+function findTrackIndexByPath(path) {
+  if (!path) return -1;
+  return state.tracks.findIndex((track) => isSamePath(track.path, path));
+}
+
+function currentPlayableIndex(list = playableTracks()) {
+  if (!list.length) return -1;
+  const currentPath = state.player.current?.path || state.tracks[state.selectedTrackIndex]?.path || "";
+  const byPath = list.findIndex((track) => currentPath && isSamePath(track.path, currentPath));
+  if (byPath >= 0) return byPath;
+  const selected = state.tracks[state.selectedTrackIndex];
+  return list.findIndex((track) => selected?.path && isSamePath(track.path, selected.path));
+}
+
+async function playAdjacent(direction) {
+  const list = playableTracks();
+  if (!list.length) {
+    toast("No playable media in your library yet.");
+    return;
+  }
+  let nextIndex = 0;
+  const current = currentPlayableIndex(list);
+  if (state.player.shuffle && direction > 0 && list.length > 1) {
+    do {
+      nextIndex = Math.floor(Math.random() * list.length);
+    } while (nextIndex === current);
+  } else {
+    nextIndex = current < 0 ? 0 : (current + direction + list.length) % list.length;
+  }
+  await playMediaItem(list[nextIndex]);
 }
 
 function firstPlayableFromHistory(entry) {
@@ -409,7 +582,10 @@ function render() {
   else if (page === "downloads") root.innerHTML = renderDownloads();
   else if (page === "new-download") root.innerHTML = renderNewDownload();
   else if (page === "playlist") root.innerHTML = renderPlaylist();
-  else if (page === "devices") root.innerHTML = renderDevices();
+  else if (page === "devices") {
+    root.innerHTML = renderDevices();
+    ensurePairingQr();
+  }
   else if (page === "settings") root.innerHTML = renderSettings();
   else if (page === "history") root.innerHTML = renderHistory();
   else if (page === "history-detail") root.innerHTML = renderHistoryDetail();
@@ -417,7 +593,7 @@ function render() {
 }
 
 function renderOverview() {
-  const downloads = state.history.slice(0, 4);
+  const downloads = indexedHistoryEntries().slice(0, 4);
   return `
     <div class="hero-card hero-card-reference" role="img" aria-label="Your music, synced locally. Private. Fast. Yours.">
       <div class="hero-reference-actions">
@@ -437,7 +613,7 @@ function renderOverview() {
       <section class="glass-card">
         <div class="section-header"><h2>Recent Downloads</h2><button class="link-button" data-page="history">View all</button></div>
         <div class="list-stack">
-          ${downloads.map((entry, index) => compactDownloadRow(entry, index)).join("") || emptyState("No downloads yet", "Start a download to fill this list.", { label: "New Download", page: "new-download", iconName: "download-simple" })}
+          ${downloads.map((entry, index) => compactDownloadRow(entry, index)).join("") || emptyState("No downloads yet", state.searchQuery ? "No recent downloads match your search." : "Start a download to fill this list.", { label: "New Download", page: "new-download", iconName: "download-simple" })}
         </div>
       </section>
       <section class="glass-card">
@@ -482,24 +658,13 @@ function quickAction(iconName, title, note, action) {
 function compactDownloadRow(entry, index) {
   const openAction = entry.type === "folder" ? "open-library-playlist" : "open-history-detail";
   const meta = entry.artist || formatDisplayDate(entry.timestamp) || "Downloaded";
+  const historyIndex = entry.historyIndex ?? index;
   return `
-    <div class="compact-row recent-download-row" data-action="${openAction}" data-idx="${index}">
-      <img class="cover" src="${h(entry.art || coverFor(index))}" alt="" />
+    <div class="compact-row recent-download-row" data-action="${openAction}" data-idx="${historyIndex}">
+      <img class="cover" src="${h(entry.art || coverFor(index))}" data-fallback="${h(entry.type === "folder" ? asset("album-party.png") : coverFor(index))}" alt="" />
       <div class="row-title"><strong>${h(cleanTrackTitle(entry.title || entry.name))}</strong><span>${h(meta)}</span></div>
       <span class="recent-download-status">${icon("check-circle")} Downloaded</span>
-      <button class="recent-play-button" data-action="play-history" data-idx="${index}" title="Play">${icon("play", true)}</button>
-    </div>
-  `;
-}
-
-function syncActivityRow(device, index) {
-  const progress = device.status ? parseInt(device.status, 10) || 100 : index === 3 ? 60 : 100;
-  return `
-    <div class="compact-row" style="grid-template-columns:34px minmax(0,1fr) 48px 28px">
-      ${icon("device-mobile")}
-      <div class="row-title"><strong>${h(device.name)}</strong><span>Synced ${h(device.storage || "now")}</span><div class="progress-track"><span style="width:${progress}%"></span></div></div>
-      <span>${progress}%</span>
-      <span class="sync-done-icon">${icon("check-circle")}</span>
+      <button class="recent-play-button" data-action="play-history" data-idx="${historyIndex}" title="Play">${icon("play", true)}</button>
     </div>
   `;
 }
@@ -549,6 +714,8 @@ function renderLibrary() {
   const subtitle = state.libraryPlaylistHistoryIndex === null
     ? "All your music and videos, organized and ready to play."
     : "Tracks grouped inside this playlist.";
+  const syncActionLabel = state.sync.devices.length ? "Manage Phone Sync" : "Pair Phone";
+  const syncActionIcon = state.sync.devices.length ? "device-mobile" : "qr-code";
 
   return `
     <div class="library-main">
@@ -563,8 +730,12 @@ function renderLibrary() {
           <article class="glass-card library-summary">
             <span class="muted">Library Size</span>
             <strong>${h(state.stats.used.split(" ")[0] || "0")} <span>${h(state.stats.used.split(" ")[1] || "B")}</span></strong>
-            <span class="muted">${joinMeta([`${state.stats.items || 0} items`, `${state.stats.total} total`])}</span>
-            <button class="primary-button" data-action="scan-library">${icon("arrows-clockwise")} Scan Library</button>
+            <span class="muted">${joinMeta([`${state.stats.items || 0} items`, `${state.stats.total} total`, state.libraryRefreshing ? "Refreshing" : "Ready"])}</span>
+            <div class="library-sync-status">
+              <span class="muted">Phone sync</span>
+              <strong>${h(state.sync.devices.length ? `${state.sync.devices.length} paired` : "Not paired")}</strong>
+            </div>
+            <button class="ghost-button" data-page="devices">${icon(syncActionIcon)} ${syncActionLabel}</button>
           </article>
         </div>
         ${state.libraryPlaylistHistoryIndex === null ? "" : `<button class="back-link library-back" data-action="close-library-playlist">${icon("arrow-left")} Library</button>`}
@@ -572,12 +743,12 @@ function renderLibrary() {
           <div class="track-row header">
             <span></span><span>Track</span><span>Type</span><span>Duration</span><span>Status</span><span>Size</span><span>Actions</span>
           </div>
-          ${items.map((item, index) => renderLibraryRow(item, index)).join("") || emptyState("No library items", "Try a different filter or scan your library.", { label: "Scan Library", action: "scan-library", iconName: "arrows-clockwise" })}
+          ${items.map((item, index) => renderLibraryRow(item, index)).join("") || emptyState("No library items", state.searchQuery || state.libraryFilter !== "All" ? "No items match the current view." : "Start a download to add music here.", { label: "New Download", page: "new-download", iconName: "download-simple" })}
         </section>
       </div>
       <aside class="side-panel album-side">
         ${hasItems ? `
-        <img src="${h(selected.art)}" alt="" />
+        <img src="${h(selected.art)}" data-fallback="${h(selectedIsPlaylist ? asset("album-party.png") : coverFor(selectedIndex))}" alt="" />
         <h2>${h(selectedTitle)}</h2>
         <p class="muted">${selectedIsPlaylist ? "Playlist folder<br />Grouped download" : `${h(selected.artist || "Audora")}<br />${h(selected.type || "Audio")}${selectedDate ? ` <span class="meta-dot">.</span> ${h(selectedDate)}` : ""}`}</p>
         <div class="metadata-list">
@@ -589,7 +760,7 @@ function renderLibrary() {
         </div>
         <button class="primary-button" data-action="${selectedIsPlaylist ? "open-library-playlist" : "play-library"}" data-idx="${selectedIsPlaylist ? selected.historyIndex : selectedIndex}" style="width:100%">${selectedIsPlaylist ? icon("playlist") : icon("play", true)} ${selectedIsPlaylist ? "Open Playlist" : "Play"}</button>
         <button class="plain-button" data-action="${selectedIsPlaylist ? "open-path" : "open-library-path"}" data-idx="${selectedIsPlaylist ? selected.historyIndex : selectedIndex}" style="width:100%;margin-top:10px">${icon("folder-open")} ${selectedIsPlaylist ? "Reveal Folder" : "Reveal File"}</button>
-        ` : emptyState("No item selected", "Music details will appear here when your library has items.", { label: "Scan Library", action: "scan-library", iconName: "arrows-clockwise" })}
+        ` : emptyState("No item selected", "Music details will appear here when your library has items.", { label: "New Download", page: "new-download", iconName: "download-simple" })}
       </aside>
     </div>
   `;
@@ -599,19 +770,22 @@ function renderLibraryRow(item, index) {
   if (item.kind !== "playlist") return renderTrackRow(item, index);
   const active = index === state.selectedLibraryIndex;
   const title = cleanTrackTitle(item.title);
+  const deleting = item.deleteState === "deleting";
+  const deleted = item.deleteState === "deleted";
+  const playlistThumb = item.thumbnailUri || "";
   return `
-    <div class="track-row library-row playlist-library-row ${active ? "active" : ""}" data-action="open-library-playlist" data-idx="${item.historyIndex}">
+    <div class="track-row library-row playlist-library-row ${active ? "active" : ""} ${deleting ? "deleting" : ""} ${deleted ? "deleted" : ""}" data-action="open-library-playlist" data-idx="${item.historyIndex}">
       <span class="library-row-icon">${icon("folder")}</span>
       <div class="row-title" style="grid-template-columns:42px minmax(0,1fr);display:grid;align-items:center">
-        <span class="library-folder-thumb">${icon("playlist")}</span>
+        <span class="library-folder-thumb">${playlistThumb ? `<img src="${h(playlistThumb)}" data-fallback="${h(asset("album-party.png"))}" alt="" />` : icon("playlist")}</span>
         <div><strong>${h(title)}</strong><span>${joinMeta([`${item.count || 0} tracks`, "Playlist folder"])}</span></div>
       </div>
       <span>${icon("playlist")}</span>
       <span>${h(item.count || 0)} tracks</span>
-      <span class="status-tag">${icon("folder")} Grouped</span>
+      <span class="status-tag">${icon("folder")} ${deleting ? "Deleting..." : deleted ? "Deleted" : "Grouped"}</span>
       <span>${h(item.size || "-")}</span>
       <span class="row-actions">
-        <button class="icon-button danger" data-action="delete-library" data-idx="${index}" title="Delete">${icon("trash-simple")}</button>
+        <button class="icon-button danger" data-action="delete-library" data-idx="${index}" title="Delete" ${deleting || deleted ? "disabled" : ""}>${icon("trash-simple")}</button>
       </span>
     </div>
   `;
@@ -621,20 +795,23 @@ function renderTrackRow(track, index) {
   const trackIndex = track.trackIndex ?? index;
   const active = index === state.selectedLibraryIndex;
   const title = cleanTrackTitle(track.title);
+  const deleting = track.deleteState === "deleting";
+  const deleted = track.deleteState === "deleted";
+  const statusText = deleting ? "Deleting..." : deleted ? "Deleted" : track.status || "Downloaded";
   return `
-    <div class="track-row library-row ${active ? "active" : ""}" data-action="select-library" data-idx="${index}">
-      <button class="icon-button" data-action="play-library" data-idx="${index}" title="Play">${state.selectedTrackIndex === trackIndex ? icon("pause", true) : icon("play", true)}</button>
+    <div class="track-row library-row ${active ? "active" : ""} ${deleting ? "deleting" : ""} ${deleted ? "deleted" : ""}" data-action="select-library" data-idx="${index}">
+      <button class="icon-button" data-action="play-library" data-idx="${index}" title="Play" ${deleting || deleted ? "disabled" : ""}>${state.selectedTrackIndex === trackIndex ? icon("pause", true) : icon("play", true)}</button>
       <div class="row-title" style="grid-template-columns:42px minmax(0,1fr);display:grid;align-items:center">
-        <img class="cover" style="width:42px;height:42px" src="${h(track.art)}" alt="" />
+        <img class="cover" style="width:42px;height:42px" src="${h(track.art)}" data-fallback="${h(coverFor(index))}" alt="" />
         <div><strong>${h(title)}</strong><span>${h(track.artist || track.type || "Audora")}</span></div>
       </div>
       <span>${track.type === "Video" ? icon("film-strip") : icon("music-note")}</span>
-      <span>${h(track.duration || "3:53")}</span>
-      <span class="${track.status === "Syncing" ? "status-tag" : "success-tag"}">${track.status === "Syncing" ? icon("arrows-clockwise") : icon("check-circle")} ${h(track.status || "Downloaded")}</span>
-      <span>${h(track.size || "9.1 MB")}</span>
+      <span>${h(track.duration || "-")}</span>
+      <span class="${track.status === "Syncing" || deleting || deleted ? "status-tag" : "success-tag"}">${track.status === "Syncing" ? icon("arrows-clockwise") : icon("check-circle")} ${h(statusText)}</span>
+      <span>${h(track.size || "-")}</span>
       <span class="row-actions">
-        <button class="icon-button" data-action="open-library-path" data-idx="${index}" title="Reveal file">${icon("folder-open")}</button>
-        <button class="icon-button danger" data-action="delete-library" data-idx="${index}" title="Delete">${icon("trash-simple")}</button>
+        <button class="icon-button" data-action="open-library-path" data-idx="${index}" title="Reveal file" ${deleting || deleted ? "disabled" : ""}>${icon("folder-open")}</button>
+        <button class="icon-button danger" data-action="delete-library" data-idx="${index}" title="Delete" ${deleting || deleted ? "disabled" : ""}>${icon("trash-simple")}</button>
       </span>
     </div>
   `;
@@ -642,7 +819,7 @@ function renderTrackRow(track, index) {
 
 function renderDownloads() {
   const activeJobs = currentDownloadJobs();
-  const recentTracks = state.tracks.slice(0, 5);
+  const recentTracks = indexedTracks().slice(0, 5);
   const failedJobs = activeJobs.filter((item) => item.failed || item.status === "error").length;
   return `
     <div class="page-title">
@@ -667,7 +844,7 @@ function renderDownloads() {
       <div class="list-stack">
         <section class="download-card">
           <div class="section-header"><h2>Recently Downloaded</h2><button class="link-button" data-page="history">View all</button></div>
-          ${recentTracks.map((track, index) => recentDownloaded(track, index)).join("") || emptyState("No music yet", "Downloaded tracks will appear here.", { label: "New Download", page: "new-download", iconName: "download-simple" })}
+          ${recentTracks.map((track, index) => recentDownloaded(track, index)).join("") || emptyState("No music yet", state.searchQuery ? "No downloaded tracks match your search." : "Downloaded tracks will appear here.", { label: "New Download", page: "new-download", iconName: "download-simple" })}
         </section>
         <section class="download-card">
           <div class="section-header"><h2>Transfer Queue to Mobile <span class="status-tag">0</span></h2></div>
@@ -684,15 +861,16 @@ function renderDownloadRow(item, index) {
   const label = downloadStatusLabel(item);
   const active = !failed && progress === 0 && ["Reading link", "Preparing", "Downloading", "Processing"].includes(label);
   const detail = [item.downloadedText, item.speed, item.eta ? `ETA: ${item.eta}` : ""].filter(Boolean).join(" . ") || label;
+  const format = item.format || (item.mode === "Video" ? "MP4" : item.mode === "Audio" ? "MP3" : "");
   return `
     <div class="download-row ${failed ? "failed" : ""}">
-      <img class="cover large" style="width:64px;height:64px" src="${h(item.thumbnail_url || item.art || coverFor(index))}" alt="" />
+      <img class="cover large" style="width:64px;height:64px" src="${h(item.thumbnail_url || item.art || coverFor(index))}" data-fallback="${h(coverFor(index))}" alt="" />
       <div class="row-title">
         <strong>${h(cleanTrackTitle(item.title || `Download ${index + 1}`))}</strong>
         <span>${h(item.artist || item.source || item.message || "YouTube")}</span>
         ${failed ? `<span style="color:#ff5b88">Download failed - ${h(item.message || "Network error")}</span>` : `<div class="progress-track ${active ? "indeterminate" : ""}"><span style="width:${progress || (active ? 34 : 0)}%"></span></div><span>${h(detail || label)}</span>`}
       </div>
-      <span class="format-tag">${h(item.format || item.mode || "FLAC")}</span>
+      <span class="format-tag">${h(format || item.mode || "")}</span>
       <span>${failed ? "" : `${progress}%`}</span>
       ${failed ? `<button class="ghost-button" data-page="new-download">Retry</button>` : `<button class="icon-button" data-action="stop-download" title="Pause">${icon("pause")}</button>`}
     </div>
@@ -700,21 +878,34 @@ function renderDownloadRow(item, index) {
 }
 
 function recentDownloaded(track, index) {
+  const trackIndex = track.trackIndex ?? index;
+  const format = track.format || (track.type === "Video" ? "MP4" : track.type === "Audio" ? "MP3" : "");
   return `
     <div class="compact-row" style="grid-template-columns:42px minmax(0,1fr) 86px 30px 30px">
-      <img class="cover" style="width:42px;height:42px" src="${h(track.art)}" alt="" />
+      <img class="cover" style="width:42px;height:42px" src="${h(track.art)}" data-fallback="${h(coverFor(index))}" alt="" />
       <div class="row-title"><strong>${h(cleanTrackTitle(track.title))}</strong><span>${h(track.artist || track.type || "Audora")}</span></div>
-      <span class="muted">${h(track.format || "FLAC 24bit")}</span>
+      <span class="muted">${h(format)}</span>
       <span style="color:#22c55e">${icon("check-circle")}</span>
-      <button class="icon-button" data-action="play-track" data-idx="${index}" title="Play">${icon("play")}</button>
+      <button class="icon-button" data-action="play-track" data-idx="${trackIndex}" title="Play">${icon("play")}</button>
     </div>
   `;
+}
+
+function activeQualityOptions() {
+  return state.mode === "Audio" ? AUDIO_QUALITIES : VIDEO_QUALITIES;
+}
+
+function activeQualityValue() {
+  return state.mode === "Audio" ? state.settings.audio_quality : state.settings.video_quality;
 }
 
 function renderNewDownload() {
   const isAudio = state.mode === "Audio";
   const activeJobs = currentDownloadJobs();
   const failedJobs = activeJobs.filter((item) => item.failed || item.status === "error").length;
+  const qualities = activeQualityOptions();
+  const currentQuality = activeQualityValue();
+  const parallelOptions = ["1", "2", "3", "4", "5", "6", "7", "8"];
   return `
     <div class="page-title">
       <div><h1>New Download</h1><p>Download audio, video, and playlists from a YouTube link.</p></div>
@@ -731,9 +922,12 @@ function renderNewDownload() {
         </div>
         <p>Downloading ${state.mode.toLowerCase()} in <span style="color:#fb5aa6">${isAudio ? state.settings.audio_quality : state.settings.video_quality}</span></p>
         <div class="download-options">
-          ${["192 kbps", "320 kbps", "1080p"].map((value, index) => `<button class="chip ${index === 0 ? "active" : ""}">${h(value)}</button>`).join("")}
-          <span class="chip">${icon("arrows-left-right")} Parallel downloads: ${h(state.settings.parallel_downloads)}</span>
-          <span class="chip" title="${h(state.settings.download_dir)}">${icon("folder")} Save to: ${h(shortPath(state.settings.download_dir))}</span>
+          ${qualities.map((value) => `<button class="chip ${currentQuality === value ? "active" : ""}" data-action="set-quality" data-quality="${h(value)}">${h(value)}</button>`).join("")}
+          <div class="option-picker">
+            <button class="chip option-chip ${state.parallelMenuOpen ? "active-soft" : ""}" data-action="toggle-parallel-menu" title="Change parallel downloads">${icon("arrows-left-right")} <span>Parallel downloads: ${h(state.settings.parallel_downloads)}</span></button>
+            ${state.parallelMenuOpen ? `<div class="option-menu parallel-menu">${parallelOptions.map((value) => `<button class="${String(state.settings.parallel_downloads) === value ? "active" : ""}" data-action="set-parallel" data-value="${h(value)}">${h(value)}</button>`).join("")}</div>` : ""}
+          </div>
+          <button class="chip option-chip" data-action="browse-dir" title="${h(state.settings.download_dir)}">${icon("folder")} <span>Save to: ${h(shortPath(state.settings.download_dir))}</span></button>
         </div>
       </section>
       <aside class="summary-panel glass-card">
@@ -741,22 +935,25 @@ function renderNewDownload() {
         ${summaryRow("download-simple", "Queue", String(activeJobs.length), "In progress")}
         ${summaryRow("check", "Completed", String(state.stats.downloaded || state.tracks.length), "Media files")}
         ${summaryRow("x", "Failed", String(failedJobs), "Errors")}
-        ${summaryRow("folder", "Output Folder", shortPath(state.settings.download_dir), "")}
+        ${summaryRow("folder", "Output Folder", state.settings.download_dir || "Audora", "", "path-row")}
       </aside>
     </div>
     <section class="download-card" style="margin-top:18px">
       <div class="section-header"><h2>Recent Sessions</h2><button class="link-button" data-page="history">View all</button></div>
-      ${state.history.slice(0, 3).map((entry, index) => renderHistoryRow(entry, index, true)).join("") || emptyState("No recent sessions", "Completed downloads will appear here.", { label: "New Download", page: "new-download", iconName: "download-simple" })}
+      ${indexedHistoryEntries().slice(0, 3).map((entry) => renderHistoryRow(entry, entry.historyIndex, true)).join("") || emptyState("No recent sessions", state.searchQuery ? "No sessions match your search." : "Completed downloads will appear here.", { label: "New Download", page: "new-download", iconName: "download-simple" })}
     </section>
   `;
 }
 
-function summaryRow(iconName, title, value, note) {
+function summaryRow(iconName, title, value, note, className = "") {
   return `
-    <div class="summary-row">
+    <div class="summary-row ${h(className)}" title="${h(value)}">
       <span class="round-icon" style="width:52px;height:52px;font-size:28px">${icon(iconName)}</span>
-      <div><span class="muted">${h(title)}</span><strong style="display:block;font-size:24px">${h(value)}</strong></div>
-      <span class="muted">${h(note)}</span>
+      <div class="summary-row-content">
+        <span class="muted">${h(title)}</span>
+        <strong>${h(value)}</strong>
+        ${note ? `<span class="muted">${h(note)}</span>` : ""}
+      </div>
     </div>
   `;
 }
@@ -798,7 +995,7 @@ function renderPlaylistSidebar(list, metrics) {
   return `
     <aside class="summary-panel playlist-summary-panel glass-card">
       <div class="playlist-summary-head">
-        <img class="playlist-side-cover" src="${h(cover)}" alt="" />
+        <img class="playlist-side-cover" src="${h(cover)}" data-fallback="${h(asset("album-party.png"))}" alt="" />
         <div><h2>${h(cleanTrackTitle(title))}</h2><p class="muted">${h(activeText)}</p></div>
       </div>
       <div class="playlist-side-stats">
@@ -838,7 +1035,7 @@ function playlistRow(item, index) {
   const active = ["Reading link", "Preparing", "Downloading", "Processing"].includes(label);
   return `
     <div class="playlist-row">
-      <img class="cover" style="width:64px;height:64px" src="${h(item.thumbnail_url || item.art || coverFor(index))}" alt="" />
+      <img class="cover" style="width:64px;height:64px" src="${h(item.thumbnail_url || item.art || coverFor(index))}" data-fallback="${h(coverFor(index))}" alt="" />
       <span class="index-badge">#${index + 1}</span>
       <div class="row-title">
         <strong>${h(cleanTrackTitle(item.title || (item.optimistic ? "Reading playlist link" : `Track ${index + 1}`)))}</strong>
@@ -857,44 +1054,55 @@ function renderDevices() {
       <div><h1>Devices & Sync</h1><p>Connect your devices. Keep your music in perfect sync.</p></div>
     </div>
     <section class="qr-card glass-card">
-      <div>
+      <div class="pairing-copy">
         <h1>Pair your phone</h1>
         <p class="muted">Scan the QR code with Audora on your phone to connect.</p>
-        <div class="filters" style="margin:20px 0">
-          <span class="success-tag">${icon("check-circle")} Local Wi-Fi sync</span>
-          <span class="success-tag">${icon("check-circle")} Fast</span>
-          <span class="success-tag">${icon("check-circle")} Private</span>
+        <div class="pairing-tags">
+          <span>${icon("check-circle")} Local Wi-Fi sync</span>
+          <span>${icon("check-circle")} Fast</span>
+          <span>${icon("check-circle")} Private</span>
         </div>
-        <button class="primary-button" data-action="generate-qr">${icon("arrows-clockwise")} Generate New QR</button>
-        <button class="ghost-button" data-action="test-sync">${icon("pulse")} Test Connection</button>
+        <div class="pairing-actions">
+          <button class="primary-button" data-action="generate-qr">${icon("arrows-clockwise")} Generate New QR</button>
+          <button class="ghost-button" data-action="test-sync">${icon("pulse")} Test Connection</button>
+        </div>
       </div>
       <div class="qr-box">
-        ${state.qr ? `<img src="${h(state.qr)}" alt="Pairing QR code" />` : `<button class="plain-button" data-action="generate-qr">${icon("qr-code")} Generate QR</button>`}
+        ${state.qr ? `<img src="${h(state.qr)}" alt="Pairing QR code" />` : `<button class="qr-placeholder-button" data-action="generate-qr">${icon("qr-code")} <span>${state.qrLoading ? "Generating QR" : "Generate QR"}</span></button>`}
       </div>
-      <div class="metadata-list" style="border:0;margin:0;padding:0">
-        <div><span>${icon("cpu")} Local IP</span><strong>${h(state.sync.host || "192.168.1.42")}</strong></div>
-        <div><span>${icon("monitor")} Port</span><strong>${h(state.sync.port || "5353")}</strong></div>
-        <div><span>${icon("circle", true)} Local Server</span><strong style="color:${state.sync.online ? "#22c55e" : "#fb5b88"}">${state.sync.online ? "Online" : "Offline"}</strong></div>
+      <div class="sync-metric-list">
+        <div class="sync-metric-row">
+          <span class="sync-metric-icon">${icon("crosshair")}</span>
+          <div><span>Local IP</span><strong>${h(state.sync.host || "Unavailable")}</strong></div>
+        </div>
+        <div class="sync-metric-row">
+          <span class="sync-metric-icon">${icon("monitor")}</span>
+          <div><span>Port</span><strong>${h(state.sync.port || "5353")}</strong></div>
+        </div>
+        <div class="sync-metric-row server">
+          <span class="sync-status-dot"></span>
+          <div><span>Local Server</span><strong class="${state.sync.online ? "online-text" : "offline-text"}">${state.sync.online ? "Online" : "Offline"}</strong><em>Your devices can discover and connect.</em></div>
+        </div>
       </div>
     </section>
     <div class="device-grid">
-      <section class="download-card">
-        <div class="section-header"><h2>Paired Devices</h2><button class="ghost-button">${icon("sliders-horizontal")} Manage Devices</button></div>
+      <section class="download-card device-section-card">
+        <div class="section-header"><h2><span class="section-icon">${icon("device-mobile")}</span> Paired Devices</h2><button class="ghost-button" disabled title="Device management is not available yet">${icon("sliders-horizontal")} Manage Devices</button></div>
         ${state.sync.devices.map((device, index) => deviceRow(device, index)).join("") || emptyState("No paired phones", "Generate a QR code and pair your phone to start local sync.", { label: "Generate QR", action: "generate-qr", iconName: "qr-code" })}
       </section>
-      <section class="download-card">
-        <div class="section-header"><h2>Sync History</h2></div>
+      <section class="download-card device-section-card">
+        <div class="section-header"><h2><span class="section-icon">${icon("clock-counter-clockwise")}</span> Sync History</h2></div>
         ${activity.map(syncHistory).join("") || syncEmptyState("No phone sync yet", "Phone sync activity will appear after a paired device syncs files.")}
       </section>
-      <section class="download-card">
-        <div class="section-header"><h2>Manual Pairing</h2><button class="icon-button" data-action="toggle-manual">${icon("caret-down")}</button></div>
+      <section class="download-card device-section-card manual-pairing-card">
+        <div class="section-header"><h2><span class="section-icon">${icon("link")}</span> Manual Pairing</h2><button class="icon-button" data-action="toggle-manual" title="Show pairing details">${icon("caret-down")}</button></div>
         <p class="muted">If you can't scan the QR code, you can pair manually.</p>
         <div id="manualPairingBody" class="manual-grid accordion-body">
-          <div class="copy-field"><div><span>Server Address</span><strong>${h(state.sync.host || "192.168.1.42")}</strong></div><button class="icon-button" data-copy="${h(state.sync.host || "")}">${icon("copy")}</button></div>
+          <div class="copy-field"><div><span>Server Address</span><strong>${h(state.sync.host || "Unavailable")}</strong></div><button class="icon-button" data-copy="${h(state.sync.host || "")}" ${state.sync.host ? "" : "disabled"}>${icon("copy")}</button></div>
           <div class="copy-field"><div><span>Port</span><strong>${h(state.sync.port || "5353")}</strong></div><button class="icon-button" data-copy="${h(state.sync.port || "")}">${icon("copy")}</button></div>
           <div class="copy-field"><div><span>Server URL</span><strong>${h(state.sync.baseUrl || "")}</strong></div><button class="icon-button" data-copy="${h(state.sync.baseUrl || "")}">${icon("copy")}</button></div>
         </div>
-        <section class="download-card" style="margin-top:14px;padding:14px;border-color:rgba(245,158,11,.28)">
+        <section class="privacy-callout">
           <strong>${icon("shield-check")} No cloud. Local sync only.</strong>
           <p class="muted">Your music never leaves your network.</p>
         </section>
@@ -910,7 +1118,7 @@ function deviceRow(device, index) {
       <div class="row-title"><strong>${h(device.name)}</strong><span>${h(device.platform || "Phone")}</span></div>
       <span>${h(formatDisplayDate(device.lastSeen) || "Not synced")}</span>
       <span>${h(device.storage || "0 GB")}</span>
-      <button class="ghost-button">Sync Now</button>
+      <button class="ghost-button" disabled title="Desktop-initiated sync is not available yet">Sync Now</button>
       <span>${icon("dots-three")}</span>
     </div>
   `;
@@ -930,6 +1138,7 @@ function syncHistory(device, index) {
 }
 
 function renderSettings() {
+  const syncState = state.sync.online ? "Online" : "Offline";
   return `
     <div class="page-title">
       <div><h1>Settings</h1><p>Control how Audora downloads, syncs, stores, and plays your media.</p></div>
@@ -937,42 +1146,42 @@ function renderSettings() {
     </div>
     <div class="settings-grid">
       ${settingsPanel("folder", "Library Paths", "Manage locations of your media folders.", [
-    settingPath("Music", state.settings.download_dir || "Music/Audora"),
-    settingPath("Videos", "Videos/Audora"),
-    settingPath("Artwork", "Pictures/Audora"),
-    `<button class="plain-button" data-action="browse-dir" style="width:100%;margin-top:12px">${icon("plus")} Add Folder</button>`,
+    settingPath("Download folder", state.settings.download_dir || "Music/Audora"),
+    settingText("Videos folder", `<span class="muted">Uses download folder</span>${disabledButton("Edit")}`),
+    settingText("Artwork", `<span class="muted">Saved beside media</span>${disabledButton("Edit")}`),
+    `<button class="plain-button" data-action="browse-dir" style="width:100%;margin-top:12px">${icon("folder-open")} Change Folder</button>`,
   ])}
       ${settingsPanel("arrows-clockwise", "Sync Server", "Configure your local sync server.", [
-    settingText("Local Sync", `<span style="color:#22c55e">Online</span>${toggle()}`),
-    settingInput("Server Port", "syncPort", state.sync.port || "5353"),
+    settingText("Local Sync", `<span style="color:${state.sync.online ? "#22c55e" : "#fb5b88"}">${h(syncState)}</span>${toggle(true)}`),
+    settingText("Server Port", `<span class="path-input">${h(state.sync.port || "5353")}</span>`),
     settingText("LAN Visibility", `<span class="success-tag">Visible on LAN</span>`),
-    settingText("QR Pairing", toggle()),
-    settingText("Device Discovery", toggle()),
+    settingText("QR Pairing", toggle(true)),
+    settingText("Device Discovery", toggle(true)),
     settingText("Server Address", `<span class="path-input">${h(state.sync.baseUrl || "")}</span>`),
   ])}
       ${settingsPanel("download-simple", "Downloads", "Control how and where downloads are saved.", [
-    segmentedSetting("Download Quality", ["Low", "Normal", "High", "Lossless"], 2),
-    settingSelect("File Naming", "fileNaming", ["Track Number - Title", "Title", "Artist - Title"], "Track Number - Title"),
-    segmentedSetting("Format", ["MP3", "M4A", "FLAC", "WAV"], 2),
-    settingText("On Wi-Fi", toggle()),
-    settingText("On Local Sync", toggle()),
+    settingSelect("Default audio bitrate", "audioQualitySetting", AUDIO_QUALITIES, state.settings.audio_quality || "192 kbps", "audio_quality"),
+    settingSelect("Default video resolution", "videoQualitySetting", VIDEO_QUALITIES, state.settings.video_quality || "1080p", "video_quality"),
+    settingSelect("Parallel downloads", "parallelDownloadsSetting", ["1", "2", "3", "4", "5", "6", "7", "8"], String(state.settings.parallel_downloads || "3"), "parallel_downloads"),
+    settingText("File naming", `<span class="muted">Track title</span>${disabledButton("Locked")}`),
+    settingText("Format", `<span class="muted">MP3 audio / MP4 video</span>${disabledButton("Auto")}`),
   ])}
       ${settingsPanel("waveform", "Playback", "Customize your playback experience.", [
-    segmentedSetting("Audio Quality", ["Normal", "High", "Hi-Res"], 2),
-    settingInput("Crossfade", "crossfade", "4s"),
-    settingText("Gapless Playback", toggle()),
-    settingSelect("Default Output", "output", ["System Default", "Audora Virtual"], "System Default"),
+    settingText("Shuffle", toggle(true, state.player.shuffle)),
+    settingText("Repeat", toggle(true, state.player.repeat)),
+    settingText("Crossfade", `<span class="muted">Not available yet</span>${disabledButton("Soon")}`),
+    settingText("Default Output", `<span class="muted">System default</span>${disabledButton("Locked")}`),
   ])}
       ${settingsPanel("database", "Storage", "Monitor usage and manage cached data.", [
-    settingText("Used Space", `<span>${h(state.stats.percent || 0)}% • ${h(state.stats.used)} of ${h(state.stats.total)}</span>`),
-    settingText("Cache Size", `<span>12.4 GB</span><button class="ghost-button">Clear Cache</button>`),
-    settingText("Offline Downloads", `<span>42.6 GB</span><button class="ghost-button">Manage</button>`),
-    settingText("Analyze Library", `<button class="danger-button">${icon("arrows-clockwise")} Analyze</button>`),
+    settingText("Used Space", `<span>${h(state.stats.percent || 0)}% &middot; ${h(state.stats.used)} of ${h(state.stats.total)}</span>`),
+    settingText("Library items", `<span>${h(state.stats.items || 0)} items</span>${disabledButton("Manage")}`),
+    settingText("Cache Size", `<span class="muted">No separate cache</span>${disabledButton("Clear")}`),
+    settingText("Analyze Library", `<button class="danger-button" data-action="scan-library">${icon("arrows-clockwise")} Analyze</button>`),
   ])}
       ${settingsPanel("shield-check", "Security", "Manage access and keep your data private.", [
     settingText("Paired Devices", `<span>${state.sync.devices.length} devices</span><button class="ghost-button" data-page="devices">Manage</button>`),
-    settingText("Active Sessions", `<span>1 active</span><button class="ghost-button">View</button>`),
-    settingText("API Tokens", `<span>1 active token</span><button class="ghost-button">Manage</button>`),
+    settingText("Active Sessions", `<span class="muted">Local desktop session</span>${disabledButton("View")}`),
+    settingText("API Tokens", `<span class="muted">Managed by pairing</span>${disabledButton("Manage")}`),
     settingText("Privacy Mode", `<span class="success-tag">Local Only</span>`),
   ])}
     </div>
@@ -996,30 +1205,38 @@ function settingText(title, control) {
   return `<div class="settings-row"><strong>${h(title)}</strong><div class="filters" style="justify-content:end">${control}</div></div>`;
 }
 
-function settingInput(title, id, value) {
-  return `<div class="settings-row"><label for="${h(id)}"><strong>${h(title)}</strong></label><input id="${h(id)}" value="${h(value)}" /></div>`;
+function settingSelect(title, id, options, selected, settingKey) {
+  const open = Boolean(state.settingMenus[id]);
+  return `
+    <div class="settings-row">
+      <strong>${h(title)}</strong>
+      <div class="setting-select ${open ? "open" : ""}">
+        <button class="setting-select-button" data-action="toggle-setting-menu" data-menu="${h(id)}" type="button">
+          <span>${h(selected)}</span>${icon(open ? "caret-up" : "caret-down")}
+        </button>
+        ${open ? `<div class="setting-select-menu">${options.map((option) => `<button class="${option === selected ? "active" : ""}" data-action="set-setting-select" data-menu="${h(id)}" data-setting="${h(settingKey)}" data-value="${h(option)}" type="button">${h(option)}</button>`).join("")}</div>` : ""}
+      </div>
+    </div>
+  `;
 }
 
-function settingSelect(title, id, options, selected) {
-  return `<div class="settings-row"><label for="${h(id)}"><strong>${h(title)}</strong></label><select id="${h(id)}">${options.map((option) => `<option ${option === selected ? "selected" : ""}>${h(option)}</option>`).join("")}</select></div>`;
+function toggle(disabled = false, enabled = true) {
+  return `<button class="toggle ${enabled ? "" : "off"}" aria-label="${enabled ? "Enabled" : "Disabled"}" ${disabled ? 'disabled title="Not configurable yet"' : ""}></button>`;
 }
 
-function segmentedSetting(title, options, activeIndex) {
-  return `<div class="settings-row"><strong>${h(title)}</strong><div class="segmented">${options.map((option, index) => `<button class="tab-button ${index === activeIndex ? "active" : ""}" style="min-height:32px;padding:0 13px">${h(option)}</button>`).join("")}</div></div>`;
-}
-
-function toggle() {
-  return `<button class="toggle" aria-label="Enabled"></button>`;
+function disabledButton(label) {
+  return `<button class="ghost-button" disabled title="Not available yet">${h(label)}</button>`;
 }
 
 function renderHistory() {
+  const entries = indexedHistoryEntries();
   return `
     <div class="history-layout">
       <div class="page-title">
         <div><h1>Download History</h1><p>Your past downloads, playlists, and saved sessions.</p></div>
         <div class="filters">
           <span class="muted">Sort by:</span>
-          <button class="select-pill">Newest First ${icon("caret-down")}</button>
+          <button class="select-pill" disabled title="Newest first">${icon("sort-descending")} Newest First</button>
           <button class="ghost-button" data-action="open-folder">${icon("folder-open")} Open in File Explorer</button>
         </div>
       </div>
@@ -1030,8 +1247,8 @@ function renderHistory() {
         ${statCard("list-bullets", "Playlists", String(state.stats.playlists || historyPlaylistEntries().length), "All time")}
       </div>
       <section class="download-card">
-        <div class="section-header"><h2>All Download Sessions <span class="muted">(${state.history.length})</span></h2></div>
-        ${state.history.map((entry, index) => renderHistoryRow(entry, index)).join("") || emptyState("No downloads yet", "Start a download to build your history.", { label: "New Download", page: "new-download", iconName: "download-simple" })}
+        <div class="section-header"><h2>All Download Sessions <span class="muted">(${entries.length})</span></h2></div>
+        ${entries.map((entry) => renderHistoryRow(entry, entry.historyIndex)).join("") || emptyState("No downloads yet", state.searchQuery ? "No downloads match your search." : "Start a download to build your history.", { label: "New Download", page: "new-download", iconName: "download-simple" })}
       </section>
     </div>
   `;
@@ -1051,15 +1268,15 @@ function renderHistoryRow(entry, index, compact = false) {
   ]);
   return `
     <div class="${className}" data-action="open-history-detail" data-idx="${index}">
-      <img class="cover large" style="width:${compact ? 72 : 74}px;height:${compact ? 72 : 74}px" src="${h(entry.art || coverFor(index))}" alt="" />
+      <img class="cover large" style="width:${compact ? 72 : 74}px;height:${compact ? 72 : 74}px" src="${h(entry.art || coverFor(index))}" data-fallback="${h(entry.type === "folder" ? asset("album-party.png") : coverFor(index))}" alt="" />
       <div class="row-title">
         <strong>${h(cleanTrackTitle(entry.title || entry.name))}</strong>
         <span>${meta}</span>
         <span class="delete-note">${status}</span>
       </div>
-      <button class="icon-button" data-action="play-history" data-idx="${index}" title="Play">${icon("play", true)}</button>
-      <button class="icon-button" data-action="open-path" data-idx="${index}" title="Open folder">${icon("folder-open")}</button>
-      <button class="icon-button danger" data-action="delete-history" data-idx="${index}" title="Delete">${icon("trash-simple")}</button>
+      <button class="icon-button" data-action="play-history" data-idx="${index}" title="Play" ${deleting || deleted ? "disabled" : ""}>${icon("play", true)}</button>
+      <button class="icon-button" data-action="open-path" data-idx="${index}" title="Open folder" ${deleting || deleted ? "disabled" : ""}>${icon("folder-open")}</button>
+      <button class="icon-button danger" data-action="delete-history" data-idx="${index}" title="Delete" ${deleting || deleted ? "disabled" : ""}>${icon("trash-simple")}</button>
     </div>
   `;
 }
@@ -1075,6 +1292,9 @@ function renderHistoryDetail() {
     `;
   }
   const children = Array.isArray(entry.children) ? entry.children : [];
+  const entryDeleting = entry.deleteState === "deleting";
+  const entryDeleted = entry.deleteState === "deleted";
+  const detailThumb = entry.thumbnailUri || firstChildArt(children);
   return `
     <button class="back-link" data-page="history">${icon("arrow-left")} Download History</button>
     <div class="detail-layout" style="margin-top:34px">
@@ -1085,13 +1305,13 @@ function renderHistoryDetail() {
           <p>${h(formatDisplayDate(entry.timestamp) || "")}</p>
         </div>
         <section class="detail-list glass-card" style="margin-top:18px">
-          <div class="section-header"><div></div><div class="segmented"><button class="tab-button active">${icon("list-bullets")}</button><button class="tab-button">${icon("squares-four")}</button></div></div>
+          <div class="section-header"><div></div><div class="segmented"><button class="tab-button active" disabled title="List view">${icon("list-bullets")}</button><button class="tab-button" disabled title="Grid view is not available yet">${icon("squares-four")}</button></div></div>
           ${entry.type === "folder" ? (children.map((child, index) => detailTrackRow(child, index)).join("") || emptyState("No tracks in this download", "Audora did not find child files for this item.", { label: "Back to History", page: "history", iconName: "arrow-left" })) : detailSingleRow(entry)}
           <p class="muted" style="text-align:center">${entry.type === "folder" ? children.length : 1} track${entry.type === "folder" && children.length !== 1 ? "s" : ""}</p>
         </section>
       </section>
       <aside class="side-panel detail-side">
-        <div class="folder-hero">${icon(entry.type === "folder" ? "folder" : "file-audio")}</div>
+        ${detailThumb ? `<img class="folder-hero-image" src="${h(detailThumb)}" data-fallback="${h(asset("album-party.png"))}" alt="" />` : `<div class="folder-hero">${icon(entry.type === "folder" ? "folder" : "file-audio")}</div>`}
         <h2>${h(cleanTrackTitle(entry.title || entry.name))}</h2>
         <div class="metadata-list">
           <div><span>${icon("list-bullets")} Total Tracks</span><strong>${h(entry.count || children.length || 1)}</strong></div>
@@ -1100,8 +1320,8 @@ function renderHistoryDetail() {
           <div><span>${icon("folder")} Location</span><strong>${h(shortPath(entry.path || ""))}</strong></div>
           <div><span>${icon("hard-drives")} Size</span><strong>${h(entry.size || "-")}</strong></div>
         </div>
-        <button class="primary-button" data-action="open-path" data-idx="${state.selectedHistoryIndex}" style="width:100%">${icon("folder-open")} Open Folder</button>
-        <button class="plain-button" data-action="play-history" data-idx="${state.selectedHistoryIndex}" style="width:100%;margin-top:12px">${icon("play")} Play All</button>
+        <button class="primary-button" data-action="open-path" data-idx="${state.selectedHistoryIndex}" style="width:100%" ${entryDeleting || entryDeleted ? "disabled" : ""}>${icon("folder-open")} Open Folder</button>
+        <button class="plain-button" data-action="play-history" data-idx="${state.selectedHistoryIndex}" style="width:100%;margin-top:12px" ${entryDeleting || entryDeleted ? "disabled" : ""}>${icon("play")} Play All</button>
       </aside>
     </div>
   `;
@@ -1109,28 +1329,31 @@ function renderHistoryDetail() {
 
 function detailTrackRow(child, index) {
   const deleting = child.deleteState === "deleting";
+  const deleted = child.deleteState === "deleted";
   return `
-    <div class="detail-row ${deleting ? "deleting" : ""}">
-      <img class="cover large" style="width:92px;height:72px" src="${h(child.thumbnailUri || child.art || coverFor(index))}" alt="" />
-      <div class="row-title"><strong>${h(cleanTrackTitle(child.title || child.name))}</strong><span>${deleting ? "Deleting..." : `${icon("calendar")} ${h(formatDisplayDate(child.timestamp) || "")}`}</span></div>
+    <div class="detail-row ${deleting ? "deleting" : ""} ${deleted ? "deleted" : ""}">
+      <img class="cover large" style="width:92px;height:72px" src="${h(child.thumbnailUri || child.art || coverFor(index))}" data-fallback="${h(coverFor(index))}" alt="" />
+      <div class="row-title"><strong>${h(cleanTrackTitle(child.title || child.name))}</strong><span>${deleting ? "Deleting..." : deleted ? "Deleted" : `${icon("calendar")} ${h(formatDisplayDate(child.timestamp) || "")}`}</span></div>
       <div class="filters" style="justify-content:end">
-        <button class="icon-button" data-action="play-detail-child" data-idx="${index}">${icon("play", true)}</button>
-        <button class="icon-button" data-action="open-detail-child-path" data-idx="${index}">${icon("folder-open")}</button>
-        <button class="icon-button danger" data-action="delete-detail-child" data-idx="${index}">${icon("trash-simple")}</button>
+        <button class="icon-button" data-action="play-detail-child" data-idx="${index}" ${deleting || deleted ? "disabled" : ""}>${icon("play", true)}</button>
+        <button class="icon-button" data-action="open-detail-child-path" data-idx="${index}" ${deleting || deleted ? "disabled" : ""}>${icon("folder-open")}</button>
+        <button class="icon-button danger" data-action="delete-detail-child" data-idx="${index}" ${deleting || deleted ? "disabled" : ""}>${icon("trash-simple")}</button>
       </div>
     </div>
   `;
 }
 
 function detailSingleRow(entry) {
+  const deleting = entry.deleteState === "deleting";
+  const deleted = entry.deleteState === "deleted";
   return `
-    <div class="detail-row">
-      <img class="cover large" style="width:92px;height:72px" src="${h(entry.thumbnailUri || entry.art || coverFor(0))}" alt="" />
-      <div class="row-title"><strong>${h(cleanTrackTitle(entry.title || entry.name))}</strong><span>${icon("calendar")} ${h(formatDisplayDate(entry.timestamp) || "")}</span></div>
+    <div class="detail-row ${deleting ? "deleting" : ""} ${deleted ? "deleted" : ""}">
+      <img class="cover large" style="width:92px;height:72px" src="${h(entry.thumbnailUri || entry.art || coverFor(0))}" data-fallback="${h(entry.type === "folder" ? asset("album-party.png") : coverFor(0))}" alt="" />
+      <div class="row-title"><strong>${h(cleanTrackTitle(entry.title || entry.name))}</strong><span>${deleting ? "Deleting..." : deleted ? "Deleted" : `${icon("calendar")} ${h(formatDisplayDate(entry.timestamp) || "")}`}</span></div>
       <div class="filters" style="justify-content:end">
-        <button class="icon-button" data-action="play-history" data-idx="${state.selectedHistoryIndex}">${icon("play", true)}</button>
-        <button class="icon-button" data-action="open-path" data-idx="${state.selectedHistoryIndex}">${icon("folder-open")}</button>
-        <button class="icon-button danger" data-action="delete-history" data-idx="${state.selectedHistoryIndex}">${icon("trash-simple")}</button>
+        <button class="icon-button" data-action="play-history" data-idx="${state.selectedHistoryIndex}" ${deleting || deleted ? "disabled" : ""}>${icon("play", true)}</button>
+        <button class="icon-button" data-action="open-path" data-idx="${state.selectedHistoryIndex}" ${deleting || deleted ? "disabled" : ""}>${icon("folder-open")}</button>
+        <button class="icon-button danger" data-action="delete-history" data-idx="${state.selectedHistoryIndex}" ${deleting || deleted ? "disabled" : ""}>${icon("trash-simple")}</button>
       </div>
     </div>
   `;
@@ -1162,6 +1385,24 @@ async function refreshState() {
   render();
 }
 
+async function ensurePairingQr() {
+  if (state.qr || state.qrLoading || state.page !== "devices") return;
+  state.qrLoading = true;
+  const result = await callApi("generate_pairing", undefined, null);
+  state.qrLoading = false;
+  if (result && result.qr) {
+    state.qr = result.qr;
+    if (result.sync) state.sync = { ...state.sync, ...result.sync };
+  }
+  if (state.page === "devices") render();
+}
+
+function refreshAfterDownloadSettles() {
+  [160, 520, 1100, 2200].forEach((delay) => {
+    setTimeout(refreshState, delay);
+  });
+}
+
 async function pollEvents() {
   const data = await callApi("poll_events", undefined, null);
   if (!data) return;
@@ -1176,12 +1417,17 @@ async function pollEvents() {
   }
   if (Array.isArray(data.logs)) state.logs = data.logs;
   if (data.sync) state.sync = { ...state.sync, ...data.sync };
+  if (typeof data.libraryRefreshing === "boolean") state.libraryRefreshing = data.libraryRefreshing;
   if (terminalDownload) {
     state.downloadsActive = false;
     state.downloadStartedAt = 0;
     state.jobs = [];
     render();
-    setTimeout(refreshState, 250);
+    refreshAfterDownloadSettles();
+    return;
+  }
+  if (data.libraryChanged) {
+    await refreshState();
     return;
   }
   if (data.changed || wasActive !== state.downloadsActive) render();
@@ -1258,9 +1504,39 @@ function removeDeletedMediaPath(path) {
   if (currentPath && isPathInside(currentPath, path)) {
     const media = $("#mediaPlayer");
     media?.pause();
-    state.player = { playing: false, current: null };
+    state.player = { ...state.player, playing: false, current: null };
     setVideoPanelVisible(false);
   }
+}
+
+function isDeleteGone(result) {
+  return String(result?.error || "").toLowerCase().includes("no longer exists");
+}
+
+async function deleteWithLifecycle(path, removeFromState) {
+  if (!path || deleteStateFor(path)) return;
+  setDeleteState(path, "deleting");
+  render();
+  const startedAt = Date.now();
+  const result = await callApi("delete_path", { path }, { ok: true });
+  const remainingDeleteTime = Math.max(0, 750 - (Date.now() - startedAt));
+  if (remainingDeleteTime) await delay(remainingDeleteTime);
+  if (!result || result.ok === false) {
+    if (!isDeleteGone(result)) {
+      clearDeleteState(path);
+      toast((result && result.error) || "Delete failed.");
+      render();
+      return;
+    }
+  }
+  setDeleteState(path, "deleted");
+  render();
+  setTimeout(() => {
+    removeFromState();
+    clearDeleteState(path);
+    render();
+    refreshState();
+  }, 3000);
 }
 
 async function deleteLibraryItem(index) {
@@ -1270,77 +1546,43 @@ async function deleteLibraryItem(index) {
     await deleteHistory(item.historyIndex);
     return;
   }
-  const result = await callApi("delete_path", { path: item.path }, { ok: true });
-  if (!result || result.ok === false) {
-    if (!String(result?.error || "").toLowerCase().includes("no longer exists")) {
-      toast((result && result.error) || "Delete failed.");
-      return;
+  await deleteWithLifecycle(item.path, () => {
+    removeDeletedMediaPath(item.path);
+    if (state.libraryPlaylistHistoryIndex !== null) {
+      const activePlaylist = state.history[state.libraryPlaylistHistoryIndex];
+      if (!activePlaylist || activePlaylist.type !== "folder") {
+        state.libraryPlaylistHistoryIndex = null;
+        state.selectedLibraryIndex = 0;
+      }
     }
-  }
-  removeDeletedMediaPath(item.path);
-  if (state.libraryPlaylistHistoryIndex !== null) {
-    const activePlaylist = state.history[state.libraryPlaylistHistoryIndex];
-    if (!activePlaylist || activePlaylist.type !== "folder") {
-      state.libraryPlaylistHistoryIndex = null;
-      state.selectedLibraryIndex = 0;
+    if (state.selectedLibraryIndex >= libraryItems().length) {
+      state.selectedLibraryIndex = Math.max(0, libraryItems().length - 1);
     }
-  }
-  if (state.selectedLibraryIndex >= libraryItems().length) {
-    state.selectedLibraryIndex = Math.max(0, libraryItems().length - 1);
-  }
-  render();
-  setTimeout(refreshState, 150);
+  });
 }
 
 async function deleteHistory(index) {
   const entry = state.history[index];
-  if (!entry || entry.deleteState) return;
-  entry.deleteState = "deleting";
-  render();
-  const result = await callApi("delete_path", { path: entry.path }, { ok: true });
-  if (!result || result.ok === false) {
-    if (String(result?.error || "").toLowerCase().includes("no longer exists")) {
-      removeDeletedEntry(index, entry);
-      render();
-      setTimeout(refreshState, 150);
-      return;
-    }
-    entry.deleteState = "";
-    toast((result && result.error) || "Delete failed.");
-    render();
-    return;
-  }
-  removeDeletedEntry(index, entry);
-  render();
-  setTimeout(refreshState, 150);
+  if (!entry) return;
+  await deleteWithLifecycle(entry.path, () => removeDeletedEntry(index, entry));
 }
 
 async function deleteDetailChild(index) {
   const entryIndex = state.selectedHistoryIndex;
   const entry = state.history[entryIndex];
   const child = Array.isArray(entry?.children) ? entry.children[index] : null;
-  if (!entry || !child || child.deleteState) return;
-  child.deleteState = "deleting";
-  render();
-  const result = await callApi("delete_path", { path: child.path }, { ok: true });
-  if (!result || result.ok === false) {
-    if (!String(result?.error || "").toLowerCase().includes("no longer exists")) {
-      child.deleteState = "";
-      toast((result && result.error) || "Delete failed.");
-      render();
-      return;
+  if (!entry || !child) return;
+  const entryPath = entry.path;
+  await deleteWithLifecycle(child.path, () => {
+    removeDeletedMediaPath(child.path);
+    const nextEntryIndex = state.history.findIndex((item) => isSamePath(item.path, entryPath));
+    if (nextEntryIndex < 0) {
+      state.page = "history";
+      state.selectedHistoryIndex = Math.max(0, Math.min(state.selectedHistoryIndex, state.history.length - 1));
+    } else {
+      state.selectedHistoryIndex = nextEntryIndex;
     }
-  }
-
-  entry.children.splice(index, 1);
-  entry.count = entry.children.length;
-  removeDeletedMediaPath(child.path);
-  if (!entry.children.length) {
-    removeDeletedEntry(entryIndex, entry);
-    state.page = "history";
-  }
-  render();
-  setTimeout(refreshState, 150);
+  });
 }
 
 document.addEventListener("click", async (event) => {
@@ -1375,6 +1617,8 @@ document.addEventListener("click", async (event) => {
   const pageButton = event.target.closest("[data-page]");
   if (pageButton) {
     state.page = pageButton.dataset.page;
+    state.parallelMenuOpen = false;
+    state.settingMenus = {};
     render();
     return;
   }
@@ -1387,6 +1631,36 @@ document.addEventListener("click", async (event) => {
 
   if (action === "set-mode") {
     state.mode = actionButton.dataset.mode || "Audio";
+    state.parallelMenuOpen = false;
+    render();
+  } else if (action === "set-quality") {
+    const value = actionButton.dataset.quality || "";
+    if (state.mode === "Audio" && AUDIO_QUALITIES.includes(value)) state.settings.audio_quality = value;
+    if (state.mode === "Video" && VIDEO_QUALITIES.includes(value)) state.settings.video_quality = value;
+    state.parallelMenuOpen = false;
+    const result = await callApi("save_settings", state.settings, { ok: true, settings: state.settings });
+    if (result?.settings) state.settings = { ...state.settings, ...result.settings };
+    render();
+  } else if (action === "toggle-parallel-menu") {
+    state.parallelMenuOpen = !state.parallelMenuOpen;
+    render();
+  } else if (action === "set-parallel") {
+    const value = actionButton.dataset.value || state.settings.parallel_downloads;
+    state.settings.parallel_downloads = value;
+    state.parallelMenuOpen = false;
+    const result = await callApi("save_settings", state.settings, { ok: true, settings: state.settings });
+    if (result?.settings) state.settings = { ...state.settings, ...result.settings };
+    toast(`Parallel downloads set to ${state.settings.parallel_downloads}.`);
+    render();
+  } else if (action === "toggle-setting-menu") {
+    const menu = actionButton.dataset.menu || "";
+    state.settingMenus = { [menu]: !state.settingMenus[menu] };
+    render();
+  } else if (action === "set-setting-select") {
+    const key = actionButton.dataset.setting || "";
+    const value = actionButton.dataset.value || "";
+    if (key) state.settings[key] = value;
+    state.settingMenus = {};
     render();
   } else if (action === "set-library-filter") {
     state.libraryFilter = actionButton.dataset.filter || "All";
@@ -1401,9 +1675,20 @@ document.addEventListener("click", async (event) => {
     state.jobs = [];
     toast("Download stopped.");
     render();
+    refreshAfterDownloadSettles();
   } else if (action === "open-devices") {
     state.page = "devices";
     render();
+  } else if (action === "player-next") {
+    await playAdjacent(1);
+  } else if (action === "player-prev") {
+    await playAdjacent(-1);
+  } else if (action === "toggle-shuffle") {
+    state.player.shuffle = !state.player.shuffle;
+    updateChrome();
+  } else if (action === "toggle-repeat") {
+    state.player.repeat = !state.player.repeat;
+    updateChrome();
   } else if (action === "open-folder" || action === "open-path") {
     const entry = actionButton.dataset.idx === undefined ? null : state.history[idx];
     await callApi("open_path", { path: entry?.path || state.settings.download_dir }, { ok: true });
@@ -1429,6 +1714,10 @@ document.addEventListener("click", async (event) => {
     await playMediaItem(firstPlayableFromHistory(entry));
   } else if (action === "close-video-player") {
     setVideoPanelVisible(false);
+  } else if (action === "show-video-player") {
+    if (isVideoItem(state.player.current) && state.player.current?.uri) {
+      setVideoPanelVisible(true, state.player.current);
+    }
   } else if (action === "open-library-playlist") {
     state.libraryPlaylistHistoryIndex = idx;
     state.libraryFilter = "All";
@@ -1463,7 +1752,10 @@ document.addEventListener("click", async (event) => {
     state.selectedTrackIndex = idx;
     await playMediaItem(state.tracks[idx] || state.tracks[0]);
   } else if (action === "generate-qr") {
+    state.qrLoading = true;
+    render();
     const result = await callApi("generate_pairing", undefined, null);
+    state.qrLoading = false;
     if (result && result.qr) {
       state.qr = result.qr;
       if (result.sync) state.sync = { ...state.sync, ...result.sync };
@@ -1472,6 +1764,7 @@ document.addEventListener("click", async (event) => {
       render();
     } else {
       toast("QR generation is not available yet.");
+      render();
     }
   } else if (action === "scan-library") {
     const result = await callApi("scan_library", undefined, { ok: true, message: "Scanning library." });
@@ -1483,15 +1776,23 @@ document.addEventListener("click", async (event) => {
   } else if (action === "toggle-manual") {
     $("#manualPairingBody")?.classList.toggle("open");
   } else if (action === "browse-dir") {
+    state.parallelMenuOpen = false;
     const result = await callApi("choose_download_dir", undefined, null);
     if (result && result.path) {
       state.settings.download_dir = result.path;
       render();
     }
   } else if (action === "save-settings") {
-    const syncPort = $("#syncPort")?.value;
-    const result = await callApi("save_settings", { ...state.settings, sync_port: syncPort }, { ok: true });
+    const nextSettings = {
+      ...state.settings,
+      audio_quality: state.settings.audio_quality,
+      video_quality: state.settings.video_quality,
+      parallel_downloads: state.settings.parallel_downloads,
+    };
+    const result = await callApi("save_settings", nextSettings, { ok: true, settings: nextSettings });
+    if (result?.settings) state.settings = { ...state.settings, ...result.settings };
     toast((result && result.message) || "Settings saved.");
+    render();
   }
 });
 
@@ -1502,11 +1803,24 @@ window.addEventListener("DOMContentLoaded", () => {
       const target = event.target;
       if (target && target.tagName === "IMG" && !target.dataset.fallbackApplied) {
         target.dataset.fallbackApplied = "true";
-        target.src = asset("album-moment-apart.png");
+        target.src = target.dataset.fallback || asset("album-moment-apart.png");
       }
     },
     true,
   );
+  $("#globalSearch")?.addEventListener("input", (event) => {
+    state.searchQuery = event.target.value || "";
+    state.selectedLibraryIndex = 0;
+    render();
+  });
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      const search = $("#globalSearch");
+      search?.focus();
+      search?.select();
+    }
+  });
   renderNav();
   render();
   const media = $("#mediaPlayer");
@@ -1519,9 +1833,14 @@ window.addEventListener("DOMContentLoaded", () => {
       state.player.playing = false;
       updateChrome();
     });
-    media.addEventListener("ended", () => {
+    media.addEventListener("ended", async () => {
       state.player.playing = false;
       updateChrome();
+      if (state.player.repeat && state.player.current) {
+        await playMediaItem(state.player.current);
+      } else {
+        await playAdjacent(1);
+      }
     });
     media.addEventListener("loadedmetadata", updatePlayerProgress);
     media.addEventListener("durationchange", updatePlayerProgress);

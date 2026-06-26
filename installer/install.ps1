@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Bootstraps the YouTube Downloader application on Windows.
+    Bootstraps the Audora application on Windows.
 .DESCRIPTION
     The script installs Python if necessary, creates an isolated virtual
     environment and installs the application's dependencies. A helper script

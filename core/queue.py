@@ -317,7 +317,8 @@ class DownloadManager:
         job_id = str(uuid.uuid4())
         stop_event = threading.Event()
 
-        self._emit_placeholder(job_id, entry)
+        mode = "Video" if video_quality is not None else "Audio"
+        self._emit_placeholder(job_id, entry, mode)
 
         future = self._executor.submit(
             self._run_worker,
@@ -352,7 +353,7 @@ class DownloadManager:
                 self._had_errors = True
 
     # ------------------------------------------------------------------
-    def _emit_placeholder(self, job_id: str, entry: QueueEntry) -> None:
+    def _emit_placeholder(self, job_id: str, entry: QueueEntry, mode: str) -> None:
         placeholder = DownloadProgress(
             status="queued",
             message="queued",
@@ -362,6 +363,7 @@ class DownloadManager:
             item_count=entry.total,
             job_id=job_id,
             thumbnail_url=entry.thumbnail_url,
+            mode=mode,
         )
         self._progress(placeholder)
 
@@ -386,6 +388,8 @@ class DownloadManager:
                 progress.item_count = entry.total
             if progress.thumbnail_url is None:
                 progress.thumbnail_url = entry.thumbnail_url
+            if not progress.mode:
+                progress.mode = "Video" if video_quality is not None else "Audio"
             if progress.status == "error":
                 self._had_errors = True
             self._progress(progress)

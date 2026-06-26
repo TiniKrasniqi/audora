@@ -36,16 +36,28 @@ def ensure_ffmpeg_or_die(root=None):
 def default_download_dir():
     """Return the default folder used by the app to store downloads.
 
-    We prefer keeping everything inside a dedicated "YouTubeDownloader" directory
-    beneath the user's Music folder (if available). If we cannot create that
-    directory, gracefully fall back to a similar folder inside Downloads, and as a
-    last resort, a "downloads" directory inside the current working directory.
+    New installs use a dedicated "Audora" directory beneath the user's Music
+    folder when possible. Existing legacy "YouTubeDownloader" folders are still
+    respected so older users keep seeing the files they already downloaded.
     """
 
     home = os.path.expanduser("~")
-    candidates = [
+    legacy_candidates = [
         os.path.join(home, "Music", "YouTubeDownloader"),
         os.path.join(home, "Downloads", "YouTubeDownloader"),
+    ]
+    for path in legacy_candidates:
+        try:
+            if os.path.isdir(path):
+                with os.scandir(path) as entries:
+                    if any(entries):
+                        return path
+        except OSError:
+            continue
+
+    candidates = [
+        os.path.join(home, "Music", "Audora"),
+        os.path.join(home, "Downloads", "Audora"),
     ]
 
     for path in candidates:

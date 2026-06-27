@@ -261,6 +261,17 @@ class SyncDatabase:
             rows = self._conn.execute("SELECT * FROM tracks ORDER BY title COLLATE NOCASE, updated_at DESC").fetchall()
             return [TrackRecord.from_row(row) for row in rows]
 
+    def prune_tracks_except(self, track_ids: set[str]):
+        with self._lock:
+            rows = self._conn.execute("SELECT id FROM tracks").fetchall()
+            stale_ids = [row["id"] for row in rows if row["id"] not in track_ids]
+            for index in range(0, len(stale_ids), 500):
+                chunk = stale_ids[index : index + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                self._conn.execute(f"DELETE FROM tracks WHERE id IN ({placeholders})", tuple(chunk))
+                self._conn.execute(f"DELETE FROM playlist_tracks WHERE track_id IN ({placeholders})", tuple(chunk))
+            self._conn.commit()
+
     def count_tracks(self) -> int:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS count FROM tracks").fetchone()

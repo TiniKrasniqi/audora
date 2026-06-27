@@ -39,6 +39,14 @@ class DownloaderOptionsTests(unittest.TestCase):
         self.assertEqual(opts["js_runtimes"], {"node": {"path": "C:/Program Files/nodejs/node.exe"}})
         self.assertEqual(opts["remote_components"], ["ejs:github"])
 
+    def test_video_options_prefer_ios_playable_mp4_streams(self):
+        opts = self._downloader().build_video_opts("https://youtu.be/example", "C:/downloads", "720p")
+
+        self.assertIn("[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]", opts["format"])
+        self.assertEqual(opts["merge_output_format"], "mp4")
+        self.assertIn("vcodec:h264", opts["format_sort"])
+        self.assertIn("acodec:aac", opts["format_sort"])
+
     def test_playlist_entry_template_uses_queue_metadata(self):
         entry = QueueEntry(
             url="https://www.youtube.com/watch?v=abc",

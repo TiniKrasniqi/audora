@@ -47,7 +47,21 @@ def _find_artwork(path: Path) -> str:
     return ""
 
 
-def _guess_mime_type(path: Path) -> str:
+def _guess_mime_type(path: Path, media_info=None) -> str:
+    suffix = path.suffix.lower()
+    if media_info:
+        if suffix == ".mp4" and media_info.has_audio and not media_info.has_video:
+            return "audio/mp4"
+        if suffix == ".webm" and media_info.has_audio and not media_info.has_video:
+            return "audio/webm"
+        if media_info.has_video:
+            video_fallbacks = {
+                ".mp4": "video/mp4",
+                ".webm": "video/webm",
+            }
+            if suffix in video_fallbacks:
+                return video_fallbacks[suffix]
+
     guessed, _ = mimetypes.guess_type(str(path))
     if guessed:
         return guessed
@@ -59,7 +73,7 @@ def _guess_mime_type(path: Path) -> str:
         ".mp4": "video/mp4",
         ".webm": "video/webm",
     }
-    return fallbacks.get(path.suffix.lower(), "application/octet-stream")
+    return fallbacks.get(suffix, "application/octet-stream")
 
 
 class LibraryScanner:
@@ -69,6 +83,7 @@ class LibraryScanner:
     def scan(self, folders: Iterable[str | os.PathLike[str]]) -> List[TrackRecord]:
         indexed = []
         seen_paths = set()
+        seen_track_ids = set()
 
         for folder in folders:
             root = Path(folder).expanduser()
@@ -90,7 +105,9 @@ class LibraryScanner:
 
                 self.database.upsert_track(track)
                 indexed.append(track)
+                seen_track_ids.add(track.id)
 
+        self.database.prune_tracks_except(seen_track_ids)
         return indexed
 
     def track_from_file(self, path: Path) -> TrackRecord:
@@ -105,7 +122,7 @@ class LibraryScanner:
             artist=artist,
             album="",
             duration=int(media_info.duration or 0),
-            mime_type=_guess_mime_type(path),
+            mime_type=_guess_mime_type(path, media_info),
             extension=path.suffix.lower().lstrip("."),
             file_path=str(path),
             artwork_path=_find_artwork(path),

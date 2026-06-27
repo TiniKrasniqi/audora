@@ -3,9 +3,11 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from core.media import MediaInfo
 from core.sync.db import SyncDatabase, TrackRecord
 from core.sync.scanner import LibraryScanner
 from core.sync.security import hash_token, now_ms
@@ -106,6 +108,44 @@ class LibraryScannerTests(unittest.TestCase):
             finally:
                 database.close()
 
+    def test_scanner_prunes_deleted_tracks_from_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            track_path = os.path.join(temp_dir, "Artist - Deleted.mp3")
+            with open(track_path, "wb") as media_file:
+                media_file.write(b"audora-audio")
+
+            database = SyncDatabase(":memory:")
+            try:
+                scanner = LibraryScanner(database)
+                scanner.scan([temp_dir])
+                self.assertEqual(database.count_tracks(), 1)
+
+                os.remove(track_path)
+                second_scan = scanner.scan([temp_dir])
+
+                self.assertEqual(second_scan, [])
+                self.assertEqual(database.count_tracks(), 0)
+                self.assertEqual(database.list_tracks(), [])
+            finally:
+                database.close()
+
+    def test_scanner_marks_audio_only_mp4_as_audio(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            track_path = os.path.join(temp_dir, "Artist - Audio Only.mp4")
+            with open(track_path, "wb") as media_file:
+                media_file.write(b"audora-audio")
+
+            database = SyncDatabase(":memory:")
+            try:
+                scanner = LibraryScanner(database)
+                with mock.patch("core.sync.scanner.probe_media", return_value=MediaInfo(duration=12, has_audio=True, has_video=False)):
+                    tracks = scanner.scan([temp_dir])
+
+                self.assertEqual(len(tracks), 1)
+                self.assertEqual(tracks[0].mime_type, "audio/mp4")
+            finally:
+                database.close()
+
 
 class SyncServerTests(unittest.TestCase):
     def test_pair_library_and_range_download_flow(self):
@@ -184,6 +224,10 @@ class SyncServerTests(unittest.TestCase):
                 finally:
                     conn.close()
                 self.assertEqual(count, 1)
+
+                os.remove(track_path)
+                library_after_delete = _read_json(f"{base_url}/api/v1/library", token=token)
+                self.assertEqual(library_after_delete["tracks"], [])
             finally:
                 server.close()
 

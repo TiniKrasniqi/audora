@@ -265,8 +265,14 @@ class YTAudioDownloader:
 
         ydl_opts = {
             "outtmpl": outtmpl,
-            "format": f"bestvideo[height<={height}]+bestaudio/best",
+            "format": (
+                f"bestvideo[height<={height}][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/"
+                f"bestvideo[height<={height}][ext=mp4][vcodec^=h264]+bestaudio[ext=m4a]/"
+                f"best[height<={height}][ext=mp4][vcodec^=avc1]/"
+                f"best[height<={height}][ext=mp4]"
+            ),
             "merge_output_format": "mp4",
+            "format_sort": ["vcodec:h264", "acodec:aac", "ext:mp4:m4a", "res"],
             # Surface errors to the caller so the UI can react appropriately.
             "retries": 10,
             "continuedl": True,

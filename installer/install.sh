@@ -52,6 +52,25 @@ VLC_WARNING
     fi
 }
 
+install_ffmpeg_runtime() {
+    if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+        return
+    fi
+
+    echo "Installing FFmpeg runtime..."
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+    elif command -v brew >/dev/null 2>&1; then
+        brew install ffmpeg
+    else
+        cat >&2 <<'FFMPEG_WARNING'
+Warning: FFmpeg/ffprobe was not found and could not be installed automatically.
+Install FFmpeg with your system package manager before downloading or probing media.
+FFMPEG_WARNING
+    fi
+}
+
 if [[ ! -d "$VENV_DIR" ]]; then
     echo "Creating virtual environment..."
     "$PYTHON_CMD" -m venv "$VENV_DIR"
@@ -64,6 +83,7 @@ python -m pip install --upgrade pip
 python -m pip install -r "$APP_DIR/requirements.txt"
 
 install_vlc_runtime
+install_ffmpeg_runtime
 
 if ! command -v deno >/dev/null 2>&1 \
     && ! command -v node >/dev/null 2>&1 \

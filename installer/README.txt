@@ -15,9 +15,9 @@ Building the installer
        pip install pyinstaller
 4. From the project root, run:
        python installer/build.py
-5. The archive "dist/audora_installer.zip" will be created. On
-   Windows this build step also bundles an `audora.exe` inside the
-   `app/` directory of the archive.
+5. The archive "dist/audora_installer.zip" will be created. On Windows the
+   build also produces "dist/AudoraSetup.exe" and bundles `audora.exe` inside
+   the `app/` directory of the archive.
 
 Note: the build script must be executed on Windows to produce the standalone
 executable. Running it on other operating systems will stop with an error that
@@ -25,8 +25,12 @@ explains the requirement.
 
 Using the installer
 -------------------
-1. Distribute or extract the generated ZIP file on the target machine.
-2. Run the installer script appropriate for the platform:
+1. Distribute the generated `AudoraSetup.exe` on Windows, or extract the ZIP
+   file on the target machine.
+2. On Windows, the simplest path is to run `AudoraSetup.exe`. It opens a
+   graphical setup window, extracts the payload, and runs the installer for you.
+3. If using the ZIP directly, run the installer script appropriate for the
+   platform:
    * Windows:  Right-click `install.ps1` and choose "Run with PowerShell". The
      script can install Python automatically if it is not already available.
    * Linux/macOS:  Execute `bash install.sh` from a terminal. The script will
@@ -38,4 +42,6 @@ Using the installer
    * Linux/macOS:  `./run_app.sh`
 
 Both installers create an isolated virtual environment to avoid interfering
-with any existing Python installations on the system.
+with any existing Python installations on the system. The Windows installer
+also provisions local Audora runtimes for VLC playback and FFmpeg/ffprobe, and
+installs Microsoft Edge WebView2 when it is missing.

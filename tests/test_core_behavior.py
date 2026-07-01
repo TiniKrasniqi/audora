@@ -6,11 +6,13 @@ import threading
 import time
 import unittest
 from unittest import mock
+from pathlib import Path
 
 from core.downloader import YTAudioDownloader
 from core.downloader import DownloadProgress
 from core.media import VLC_RUNTIME_SHA256, VLC_RUNTIME_URL, format_media_time, probe_media
 from core.queue import DownloadManager, QueueEntry, _build_entry_outtmpl
+from core.utils import configure_ffmpeg_runtime
 
 
 class DownloaderOptionsTests(unittest.TestCase):
@@ -252,6 +254,20 @@ class MediaHelperTests(unittest.TestCase):
         self.assertIn("/win64/", VLC_RUNTIME_URL)
         self.assertTrue(VLC_RUNTIME_URL.endswith(".zip"))
         self.assertEqual(len(VLC_RUNTIME_SHA256), 64)
+
+    def test_configure_ffmpeg_runtime_uses_audora_runtime_dir(self):
+        executable_suffix = ".exe" if os.sys.platform.startswith("win") else ""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bin_dir = Path(temp_dir) / "bin"
+            bin_dir.mkdir()
+            (bin_dir / f"ffmpeg{executable_suffix}").touch()
+            (bin_dir / f"ffprobe{executable_suffix}").touch()
+
+            with mock.patch.dict(os.environ, {"AUDORA_FFMPEG_DIR": temp_dir, "PATH": ""}):
+                resolved = configure_ffmpeg_runtime()
+
+                self.assertEqual(resolved, bin_dir.resolve())
+                self.assertTrue(os.environ["PATH"].startswith(str(bin_dir.resolve())))
 
 
 if __name__ == "__main__":

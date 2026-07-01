@@ -5,7 +5,6 @@ import unittest
 from unittest import mock
 
 from core.downloader import DownloadProgress
-from core.media import MediaInfo
 from core.utils import default_download_dir
 from ui.web_app import AudoraWebApi, _clean_settings
 
@@ -42,7 +41,7 @@ class WebAppLibrarySnapshotTests(unittest.TestCase):
                     media_file.write(b"audio")
 
             api = _api_for_directory(temp_dir)
-            with mock.patch("ui.web_app.probe_media", return_value=MediaInfo()):
+            with mock.patch("core.media.probe_media", side_effect=AssertionError("Library listing should not probe media")):
                 snapshot = api._build_library_snapshot(temp_dir)
 
             playlist = next(entry for entry in snapshot["history"] if entry["type"] == "folder")

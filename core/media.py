@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .utils import configure_ffmpeg_runtime
+
 
 VLC_VERSION = "3.0.23"
 VLC_RUNTIME_DIR_NAME = f"vlc-{VLC_VERSION}"
@@ -68,11 +70,13 @@ def _parse_frame_rate(value: object) -> float:
 
 
 def probe_media(file_path: str) -> MediaInfo:
-    if not file_path or not os.path.exists(file_path) or not shutil.which("ffprobe"):
+    configure_ffmpeg_runtime()
+    ffprobe_path = shutil.which("ffprobe")
+    if not file_path or not os.path.exists(file_path) or not ffprobe_path:
         return MediaInfo()
 
     command = [
-        "ffprobe",
+        ffprobe_path,
         "-v",
         "error",
         "-print_format",

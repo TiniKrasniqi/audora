@@ -43,7 +43,7 @@ function Install-PythonIfNeeded {
 
     Invoke-WebRequest -Uri $pythonUrl -OutFile $downloadPath
     Write-Host "Running the Python installer (this may take a while)..."
-    $arguments = @("/quiet", "InstallAllUsers=1", "PrependPath=1")
+    $arguments = @("/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=1")
     Start-Process -FilePath $downloadPath -ArgumentList $arguments -Wait
 
     Remove-Item $downloadPath -ErrorAction SilentlyContinue
@@ -69,17 +69,23 @@ $VlcVersion = "3.0.23"
 $VlcArchiveName = "vlc-$VlcVersion-win64.zip"
 $VlcDownloadUrl = "https://download.videolan.org/pub/videolan/vlc/$VlcVersion/win64/$VlcArchiveName"
 $VlcSha256 = "992d19dbd0b8a7cde9167d2f7780b1ef6f92acc8a71acfa736101a21f35181e1"
+$FfmpegArchiveName = "ffmpeg-release-essentials.zip"
+$FfmpegDownloadUrl = "https://www.gyan.dev/ffmpeg/builds/$FfmpegArchiveName"
+$WebView2DownloadUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 
-function Install-VlcRuntime {
+function Get-AudoraRuntimeRoot {
     $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
     if (-not $localAppData) {
         $localAppData = $env:LOCALAPPDATA
     }
     if (-not $localAppData) {
-        throw "Could not resolve the LocalAppData folder for the VLC runtime."
+        throw "Could not resolve the LocalAppData folder for the Audora runtime."
     }
+    return (Join-Path $localAppData "Audora\runtime")
+}
 
-    $runtimeRoot = Join-Path $localAppData "Audora\runtime"
+function Install-VlcRuntime {
+    $runtimeRoot = Get-AudoraRuntimeRoot
     $vlcDir = Join-Path $runtimeRoot "vlc-$VlcVersion"
     $libVlc = Join-Path $vlcDir "libvlc.dll"
     $pluginsDir = Join-Path $vlcDir "plugins"
@@ -128,6 +134,123 @@ function Install-VlcRuntime {
     return $vlcDir
 }
 
+function Install-FfmpegRuntime {
+    $runtimeRoot = Get-AudoraRuntimeRoot
+    $ffmpegDir = Join-Path $runtimeRoot "ffmpeg"
+    $ffmpegBinDir = Join-Path $ffmpegDir "bin"
+    $ffmpegExe = Join-Path $ffmpegBinDir "ffmpeg.exe"
+    $ffprobeExe = Join-Path $ffmpegBinDir "ffprobe.exe"
+
+    if ((Test-Path $ffmpegExe) -and (Test-Path $ffprobeExe)) {
+        Write-Host "FFmpeg runtime already installed."
+        return $ffmpegBinDir
+    }
+
+    New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+    $archivePath = Join-Path $runtimeRoot $FfmpegArchiveName
+    $extractDir = Join-Path $runtimeRoot "ffmpeg-extract-$PID"
+
+    $resolvedRoot = [IO.Path]::GetFullPath($runtimeRoot)
+    $resolvedTarget = [IO.Path]::GetFullPath($ffmpegDir)
+    if (-not $resolvedTarget.StartsWith($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to install FFmpeg outside the Audora runtime folder."
+    }
+
+    Write-Host "Downloading FFmpeg runtime..."
+    Invoke-WebRequest -Uri $FfmpegDownloadUrl -OutFile $archivePath
+
+    if (Test-Path $extractDir) {
+        Remove-Item -LiteralPath $extractDir -Recurse -Force
+    }
+    Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force
+
+    $downloadedFfmpeg = Get-ChildItem -Path $extractDir -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+    if (-not $downloadedFfmpeg) {
+        throw "The FFmpeg archive did not contain ffmpeg.exe."
+    }
+
+    $downloadedBinDir = Split-Path -Parent $downloadedFfmpeg.FullName
+    $downloadedRoot = Split-Path -Parent $downloadedBinDir
+    $downloadedFfprobe = Join-Path $downloadedBinDir "ffprobe.exe"
+    if (-not (Test-Path $downloadedFfprobe)) {
+        throw "The FFmpeg archive did not contain ffprobe.exe."
+    }
+
+    if (Test-Path $ffmpegDir) {
+        Remove-Item -LiteralPath $ffmpegDir -Recurse -Force
+    }
+    Move-Item -LiteralPath $downloadedRoot -Destination $ffmpegDir
+
+    Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+
+    Write-Host "FFmpeg runtime installed."
+    return $ffmpegBinDir
+}
+
+function Test-WebView2Runtime {
+    $clientId = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    $registryPaths = @(
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$clientId",
+        "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$clientId",
+        "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$clientId"
+    )
+    foreach ($path in $registryPaths) {
+        try {
+            $runtime = Get-ItemProperty -Path $path -ErrorAction Stop
+            if ($runtime.pv) {
+                return $true
+            }
+        } catch {
+            continue
+        }
+    }
+
+    $installRoots = @()
+    foreach ($root in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA)) {
+        if ($root) {
+            $installRoots += (Join-Path $root "Microsoft\EdgeWebView\Application")
+        }
+    }
+
+    foreach ($root in $installRoots) {
+        if (-not (Test-Path $root)) {
+            continue
+        }
+        $runtimeExe = Get-ChildItem -Path $root -Recurse -Filter "msedgewebview2.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($runtimeExe) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Install-WebView2Runtime {
+    if (Test-WebView2Runtime) {
+        Write-Host "Microsoft Edge WebView2 runtime already installed."
+        return
+    }
+
+    Write-Host "Downloading Microsoft Edge WebView2 runtime..."
+    $installerPath = Join-Path $env:TEMP "MicrosoftEdgeWebview2Setup.exe"
+    Invoke-WebRequest -Uri $WebView2DownloadUrl -OutFile $installerPath
+
+    Write-Host "Installing Microsoft Edge WebView2 runtime..."
+    $process = Start-Process -FilePath $installerPath -ArgumentList @("/silent", "/install") -Wait -PassThru
+    Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+
+    if ($process.ExitCode -ne 0 -and -not (Test-WebView2Runtime)) {
+        throw "Microsoft Edge WebView2 runtime installation failed with exit code $($process.ExitCode)."
+    }
+
+    if (-not (Test-WebView2Runtime)) {
+        throw "Microsoft Edge WebView2 runtime installation did not complete."
+    }
+
+    Write-Host "Microsoft Edge WebView2 runtime installed."
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $appDir = Join-Path $scriptDir "app"
 $venvDir = Join-Path $scriptDir "venv"
@@ -160,6 +283,8 @@ Write-Host "Installing project dependencies..."
 & $venvPython -m pip install -r (Join-Path $appDir "requirements.txt")
 
 $vlcRuntimeDir = Install-VlcRuntime
+$ffmpegBinDir = Install-FfmpegRuntime
+Install-WebView2Runtime
 
 if (-not (Test-JavaScriptRuntime)) {
     Write-Warning "No JavaScript runtime was found on PATH. The app can still run, but current yt-dlp works best for YouTube when Deno 2.3+, Node.js 22+, Bun 1.2.11+, or QuickJS is installed."
@@ -168,8 +293,15 @@ if (-not (Test-JavaScriptRuntime)) {
 $launcherPath = Join-Path $scriptDir "run_app.ps1"
 $launcherContent = @"
 `$env:AUDORA_VLC_DIR = '$vlcRuntimeDir'
+`$env:AUDORA_FFMPEG_DIR = '$ffmpegBinDir'
+`$env:PATH = "`$env:AUDORA_FFMPEG_DIR;`$env:PATH"
 Write-Host "Starting Audora..."
-& '$venvPython' (Join-Path '$appDir' 'main.py') @args
+`$audoraExe = Join-Path '$appDir' 'audora.exe'
+if (Test-Path `$audoraExe) {
+    & `$audoraExe @args
+} else {
+    & '$venvPython' (Join-Path '$appDir' 'main.py') @args
+}
 "@
 $launcherContent | Set-Content -Path $launcherPath -Encoding UTF8
 

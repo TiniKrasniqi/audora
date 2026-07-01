@@ -10,6 +10,7 @@ from yt_dlp.utils import DownloadError, DownloadCancelled
 
 from .utils import (
     available_js_runtimes,
+    configure_ffmpeg_runtime,
     human_time,
     DEFAULT_BITRATE,
     is_likely_playlist_url,
@@ -129,6 +130,10 @@ class YTAudioDownloader:
             self.progress(progress)
 
     def _add_common_opts(self, opts):
+        ffmpeg_bin_dir = configure_ffmpeg_runtime()
+        if ffmpeg_bin_dir:
+            opts["ffmpeg_location"] = str(ffmpeg_bin_dir)
+
         js_runtimes = available_js_runtimes()
         if js_runtimes:
             opts["js_runtimes"] = js_runtimes

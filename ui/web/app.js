@@ -47,6 +47,7 @@ const state = {
 
 const AUDIO_QUALITIES = ["128 kbps", "192 kbps", "256 kbps", "320 kbps"];
 const VIDEO_QUALITIES = ["480p", "720p", "1080p", "1440p", "2160p"];
+let mediaSessionReady = false;
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -421,6 +422,7 @@ function updateChrome() {
   $$('[data-action="toggle-shuffle"]').forEach((button) => button.classList.toggle("active", state.player.shuffle));
   $$('[data-action="toggle-repeat"]').forEach((button) => button.classList.toggle("active", state.player.repeat));
   updatePlayerProgress();
+  updateMediaSession();
   const storageCard = $(".storage-card");
   if (storageCard) {
     const details = storageCard.querySelector(".muted");
@@ -452,6 +454,117 @@ function updatePlayerProgress() {
   seek.value = total ? String(Math.round((current / total) * 1000)) : "0";
   elapsed.textContent = formatMediaClock(current);
   duration.textContent = formatMediaClock(total);
+  updateMediaSessionPosition();
+}
+
+function mediaSessionSupported() {
+  return "mediaSession" in navigator;
+}
+
+function absoluteAsset(src) {
+  try {
+    return new URL(src || asset("app-icon.png"), window.location.href).href;
+  } catch (_error) {
+    return asset("app-icon.png");
+  }
+}
+
+function mediaArtwork(item) {
+  const src = absoluteAsset(item?.art || asset("app-icon.png"));
+  return [
+    { src, sizes: "96x96", type: "image/png" },
+    { src, sizes: "256x256", type: "image/png" },
+    { src, sizes: "512x512", type: "image/png" },
+  ];
+}
+
+function setupMediaSession() {
+  if (!mediaSessionSupported() || mediaSessionReady) return;
+  mediaSessionReady = true;
+  const setHandler = (action, handler) => {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch (_error) {
+      // Older WebView2 builds may not expose every action.
+    }
+  };
+
+  setHandler("play", async () => {
+    const media = $("#mediaPlayer");
+    if (media?.src) {
+      await media.play();
+      state.player.playing = true;
+    } else {
+      await playMediaItem(state.tracks[state.selectedTrackIndex] || state.tracks[0]);
+    }
+    updateChrome();
+  });
+  setHandler("pause", () => {
+    const media = $("#mediaPlayer");
+    media?.pause();
+    state.player.playing = false;
+    updateChrome();
+  });
+  setHandler("previoustrack", () => playAdjacent(-1));
+  setHandler("nexttrack", () => playAdjacent(1));
+  setHandler("seekbackward", (event) => {
+    const media = $("#mediaPlayer");
+    if (media) media.currentTime = Math.max(0, Number(media.currentTime || 0) - Number(event.seekOffset || 10));
+    updatePlayerProgress();
+  });
+  setHandler("seekforward", (event) => {
+    const media = $("#mediaPlayer");
+    if (media) media.currentTime = Math.min(Number(media.duration || 0), Number(media.currentTime || 0) + Number(event.seekOffset || 10));
+    updatePlayerProgress();
+  });
+  setHandler("seekto", (event) => {
+    const media = $("#mediaPlayer");
+    if (!media || !Number.isFinite(event.seekTime)) return;
+    if (event.fastSeek && typeof media.fastSeek === "function") media.fastSeek(event.seekTime);
+    else media.currentTime = event.seekTime;
+    updatePlayerProgress();
+  });
+}
+
+function updateMediaSession() {
+  if (!mediaSessionSupported()) return;
+  setupMediaSession();
+  const current = state.player.current;
+  if (!current) {
+    navigator.mediaSession.playbackState = "none";
+    return;
+  }
+  if (typeof MediaMetadata !== "undefined") {
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: current.title || "Now playing",
+        artist: current.artist || "Audora",
+        album: "Audora",
+        artwork: mediaArtwork(current),
+      });
+    } catch (_error) {
+      // Metadata is a nice-to-have; playback should never fail because of it.
+    }
+  }
+  navigator.mediaSession.playbackState = state.player.playing ? "playing" : "paused";
+  updateMediaSessionPosition();
+}
+
+function updateMediaSessionPosition() {
+  if (!mediaSessionSupported() || typeof navigator.mediaSession.setPositionState !== "function") return;
+  const media = $("#mediaPlayer");
+  const duration = Number(media?.duration || 0);
+  if (!duration || !Number.isFinite(duration)) return;
+  const position = Math.max(0, Math.min(duration, Number(media?.currentTime || 0)));
+  try {
+    navigator.mediaSession.setPositionState({
+      duration,
+      playbackRate: Number(media?.playbackRate || 1),
+      position,
+    });
+  } catch (_error) {
+    // Ignore invalid transient states while media metadata is loading.
+  }
 }
 
 function isVideoItem(item) {
@@ -573,7 +686,7 @@ function render() {
   updateChrome();
   const root = $("#pageRoot");
   if (state.loading) {
-    root.innerHTML = `<div class="loading-state"><div><div class="spinner"></div><strong>Loading Audora</strong><p class="muted">Preparing your local library.</p></div></div>`;
+    root.innerHTML = `<div class="loading-state"><div><div class="logo-loader"><img src="${asset("app-icon.png")}" alt="" /></div><strong>Loading Audora</strong><p class="muted">Preparing your local library.</p></div></div>`;
     return;
   }
   const page = state.page;

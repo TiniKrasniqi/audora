@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import base64
+import ctypes
+from ctypes import wintypes
 import io
 import json
 import mimetypes
@@ -17,14 +19,13 @@ from datetime import datetime
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional
 from urllib.request import urlopen
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from PIL import Image, ImageDraw
+from PIL import ImageDraw
 
 from core.downloader import DownloadProgress
-from core.media import format_media_time, probe_media
 from core.queue import DownloadManager
 from core.sync import AudoraSyncServer, DEFAULT_SYNC_PORT
 from core.utils import DEFAULT_BITRATE, default_download_dir, human_time
@@ -39,7 +40,9 @@ AUDIO_QUALITIES = {
 
 VIDEO_QUALITIES = ["480p", "720p", "1080p", "1440p", "2160p"]
 MEDIA_EXTENSIONS = (".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg", ".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v")
+VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"}
 SETTINGS_FILE_NAME = "settings.json"
+APP_USER_MODEL_ID = "Audora.Desktop"
 
 
 def _config_dir(name: str) -> str:
@@ -56,6 +59,94 @@ def _config_dir(name: str) -> str:
 
 def _settings_path() -> str:
     return os.path.join(_config_dir("Audora"), SETTINGS_FILE_NAME)
+
+
+def _resource_path(*parts: str) -> Path:
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    return base_dir.joinpath(*parts)
+
+
+def _web_dir() -> Path:
+    bundled = _resource_path("ui", "web")
+    if bundled.exists():
+        return bundled
+    return Path(__file__).resolve().parent / "web"
+
+
+def _app_icon_path() -> Optional[str]:
+    for candidate in (
+        _web_dir() / "assets" / "app-icon.ico",
+        _web_dir() / "assets" / "app-icon.png",
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _set_windows_app_identity() -> None:
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
+def _find_main_window_handles() -> List[int]:
+    if not sys.platform.startswith("win"):
+        return []
+
+    handles: List[int] = []
+    current_pid = os.getpid()
+    enum_windows_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def collect(hwnd, _lparam):
+        process_id = wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        if process_id.value != current_pid or not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        title = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, title, length + 1)
+        if title.value == "Audora":
+            handles.append(int(hwnd))
+        return True
+
+    ctypes.windll.user32.EnumWindows(enum_windows_proc(collect), 0)
+    return handles
+
+
+def _set_dwm_attribute(hwnd: int, attribute: int, value: int) -> bool:
+    try:
+        data = ctypes.c_int(value)
+        result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            wintypes.HWND(hwnd),
+            ctypes.c_int(attribute),
+            ctypes.byref(data),
+            ctypes.sizeof(data),
+        )
+        return result == 0
+    except Exception:
+        return False
+
+
+def _style_windows_titlebar() -> None:
+    if not sys.platform.startswith("win"):
+        return
+
+    for _ in range(24):
+        handles = _find_main_window_handles()
+        if handles:
+            for hwnd in handles:
+                _set_dwm_attribute(hwnd, 20, 1)  # DWMWA_USE_IMMERSIVE_DARK_MODE
+                _set_dwm_attribute(hwnd, 19, 1)  # Older Windows 10 builds
+                _set_dwm_attribute(hwnd, 35, 0x00110A08)  # DWMWA_CAPTION_COLOR, #080a11
+                _set_dwm_attribute(hwnd, 36, 0x00FCFAF8)  # DWMWA_TEXT_COLOR, #f8fafc
+            return
+        time.sleep(0.08)
 
 
 def _legacy_settings_path() -> str:
@@ -175,29 +266,6 @@ def _path_uri(path: Optional[str]) -> str:
         return ""
 
 
-def _image_data_uri(path: Optional[str], size: int = 220) -> str:
-    if not path:
-        return ""
-    try:
-        with Image.open(path) as image:
-            image = image.convert("RGB")
-            image.thumbnail((size, size))
-            buffer = io.BytesIO()
-            image.save(buffer, format="PNG")
-        return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
-    except Exception:  # pylint: disable=broad-except
-        return ""
-
-
-def _find_thumbnail(file_path: str) -> Optional[str]:
-    base, _ = os.path.splitext(file_path)
-    for ext in (".jpg", ".jpeg", ".png", ".webp"):
-        candidate = base + ext
-        if os.path.exists(candidate):
-            return candidate
-    return None
-
-
 def _sidecars_for_file(file_path: str) -> List[str]:
     base, _ = os.path.splitext(file_path)
     return [candidate for ext in (".jpg", ".jpeg", ".png", ".webp") if os.path.exists((candidate := base + ext))]
@@ -205,6 +273,10 @@ def _sidecars_for_file(file_path: str) -> List[str]:
 
 def _is_media_file(path: str) -> bool:
     return path.lower().endswith(MEDIA_EXTENSIONS)
+
+
+def _media_type_from_extension(path: str) -> str:
+    return "Video" if Path(path).suffix.lower() in VIDEO_EXTENSIONS else "Audio"
 
 
 def _safe_joined(root: str, target: str) -> bool:
@@ -425,7 +497,7 @@ class AudoraWebApi:
                     self._mark_library_dirty()
                     should_refresh_library = True
         if should_refresh_library:
-            self._refresh_library_now(self.settings.get("download_dir") or default_download_dir())
+            self._ensure_library_refresh(self.settings.get("download_dir") or default_download_dir())
         self._event_queue.put({"type": "progress", "progress": item})
 
     def _history_entries(self, directory: str, include_folders: bool = True, limit: Optional[int] = None) -> List[dict]:
@@ -439,14 +511,12 @@ class AudoraWebApi:
                         path = entry.path
                         if entry.is_file() and _is_media_file(entry.name):
                             stat = entry.stat()
-                            thumb = _find_thumbnail(path)
                             ext = Path(entry.name).suffix.replace(".", "").upper()
-                            media_info = probe_media(path)
-                            has_video = media_info.has_video or ext in ("MP4", "WEBM", "MKV", "MOV", "AVI", "M4V")
+                            media_type = _media_type_from_extension(entry.name)
                             entries.append(
                                 {
                                     "type": "file",
-                                    "mediaType": "Video" if has_video else "Audio",
+                                    "mediaType": media_type,
                                     "name": entry.name,
                                     "title": entry.name,
                                     "path": path,
@@ -454,11 +524,12 @@ class AudoraWebApi:
                                     "fileUri": _path_uri(path),
                                     "mtime": stat.st_mtime,
                                     "timestamp": _timestamp(stat.st_mtime),
+                                    "sizeBytes": int(stat.st_size),
                                     "size": _format_bytes(stat.st_size),
                                     "format": ext,
-                                    "duration": format_media_time(media_info.duration) if media_info.duration else "",
+                                    "duration": "",
                                     "count": 1,
-                                    "thumbnailUri": _image_data_uri(thumb),
+                                    "thumbnailUri": "",
                                 }
                             )
                         elif include_folders and entry.is_dir():
@@ -468,7 +539,7 @@ class AudoraWebApi:
                             stat = entry.stat()
                             latest_child = max((child.get("mtime") or 0) for child in children)
                             thumbnail_uri = next((child.get("thumbnailUri") for child in children if child.get("thumbnailUri")), "")
-                            size_bytes = sum(self._folder_size(path))
+                            size_bytes = sum(int(child.get("sizeBytes") or 0) for child in children)
                             entries.append(
                                 {
                                     "type": "folder",
@@ -479,6 +550,7 @@ class AudoraWebApi:
                                     "mtime": max(stat.st_mtime, latest_child),
                                     "timestamp": _timestamp(max(stat.st_mtime, latest_child)),
                                     "count": len(children),
+                                    "sizeBytes": size_bytes,
                                     "size": _format_bytes(size_bytes),
                                     "thumbnailUri": thumbnail_uri,
                                     "children": children,
@@ -491,17 +563,8 @@ class AudoraWebApi:
         entries.sort(key=lambda item: item.get("mtime") or 0, reverse=True)
         return entries
 
-    def _folder_size(self, directory: str) -> Iterable[int]:
-        for root, _dirs, files in os.walk(directory):
-            for filename in files:
-                path = os.path.join(root, filename)
-                try:
-                    yield os.path.getsize(path)
-                except OSError:
-                    continue
-
     def _library_stats(self, directory: str, history: List[dict], library: List[dict]) -> dict:
-        used_bytes = sum(self._folder_size(directory)) if directory and os.path.isdir(directory) else 0
+        used_bytes = sum(int(entry.get("sizeBytes") or 0) for entry in library)
         try:
             usage = shutil.disk_usage(directory) if directory and os.path.exists(directory) else shutil.disk_usage(default_download_dir())
             total_bytes = usage.total
@@ -681,16 +744,15 @@ class AudoraWebApi:
                 except OSError:
                     continue
                 ext = Path(filename).suffix.replace(".", "").upper()
-                thumb = _find_thumbnail(path)
-                media_info = probe_media(path)
-                has_video = media_info.has_video or ext in ("MP4", "WEBM", "MKV", "MOV", "AVI", "M4V")
+                media_type = _media_type_from_extension(filename)
                 rows.append(
                     {
                         "title": Path(filename).stem,
                         "artist": Path(root).name if Path(root).name else "Audora",
-                        "type": "Video" if has_video else "Audio",
-                        "duration": format_media_time(media_info.duration) if media_info.duration else "",
+                        "type": media_type,
+                        "duration": "",
                         "status": "Downloaded",
+                        "sizeBytes": int(stat.st_size),
                         "size": _format_bytes(stat.st_size),
                         "format": ext,
                         "path": path,
@@ -698,7 +760,7 @@ class AudoraWebApi:
                         "fileUri": _path_uri(path),
                         "timestamp": _timestamp(stat.st_mtime),
                         "mtime": stat.st_mtime,
-                        "thumbnailUri": _image_data_uri(thumb),
+                        "thumbnailUri": "",
                     }
                 )
         rows.sort(key=lambda item: item.get("mtime") or 0, reverse=True)
@@ -868,7 +930,7 @@ class AudoraWebApi:
     def stop_download(self) -> dict:
         self.manager.stop_all()
         self._mark_library_dirty()
-        self._refresh_library_now(self.settings.get("download_dir") or default_download_dir())
+        self._ensure_library_refresh(self.settings.get("download_dir") or default_download_dir(), force=True)
         return {"ok": True, "message": "Download stopped."}
 
     def save_settings(self, settings: dict) -> dict:
@@ -1011,8 +1073,10 @@ def run_app() -> None:
     except ModuleNotFoundError as exc:
         raise RuntimeError("pywebview is required for the Audora desktop UI. Run: pip install -r requirements.txt") from exc
 
+    _set_windows_app_identity()
     api = AudoraWebApi()
-    web_dir = Path(__file__).resolve().parent / "web"
+    web_dir = _web_dir()
+    app_icon = _app_icon_path()
     static_server, url = _start_static_server(web_dir, api)
     webview.create_window(
         "Audora",
@@ -1024,7 +1088,10 @@ def run_app() -> None:
         background_color="#05060a",
     )
     try:
-        webview.start(debug=False)
+        start_kwargs = {"debug": False}
+        if app_icon:
+            start_kwargs["icon"] = app_icon
+        webview.start(_style_windows_titlebar, **start_kwargs)
     finally:
         static_server.shutdown()
         static_server.server_close()

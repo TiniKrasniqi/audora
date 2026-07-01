@@ -20,7 +20,8 @@ Audora is a polished desktop app for turning YouTube links into high-quality aud
 ## 🛠️ Installation & setup
 1. **Prerequisites**
    - Python 3.9 or newer.
-   - FFmpeg available on your system `PATH`.
+   - FFmpeg available on your system `PATH` or installed through the Audora
+     installer.
    - Recommended for current yt-dlp YouTube reliability: one supported
      JavaScript runtime on `PATH`, such as Deno 2.3+, Node.js 22+, Bun 1.2.11+,
      or QuickJS.
@@ -54,14 +55,17 @@ python installer/build.py
 ```
 
 The script produces `dist/audora_installer.zip`, which contains the
-application source alongside two installer entry points:
+application source alongside two installer entry points. On Windows it also
+produces `dist/AudoraSetup.exe`, a graphical setup executable that extracts and
+runs the installer for you.
 
-- **Windows:** Run `install.ps1`. The script downloads Python if it is missing,
-  creates an isolated virtual environment, and installs all Python
-  dependencies automatically.
+- **Windows:** Run `AudoraSetup.exe`, or extract the ZIP and run `install.ps1`.
+  The script downloads Python if it is missing, creates an isolated virtual
+  environment, installs all Python dependencies, provisions Audora-local VLC
+  and FFmpeg runtimes, and installs Microsoft Edge WebView2 when it is missing.
 - **Linux/macOS:** Run `install.sh`. The script ensures Python 3 is installed
   (using `apt` or Homebrew when available), provisions a virtual environment,
-  and installs the required packages.
+  and installs the required packages, VLC, and FFmpeg when possible.
 
 After either installer completes, launch Audora with the generated
 `run_app` helper script (`run_app.ps1` on Windows or `run_app.sh` on

@@ -1,7 +1,7 @@
 customtkinter>=5.2.0
 Pillow>=10.0.0
 PyInstaller>=6.3.0
-yt-dlp
+yt-dlp[default]>=2026.8.19
 python-vlc>=3.0.21203
 qrcode[pil]>=7.4.2
 pywebview>=5.3

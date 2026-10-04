@@ -338,7 +338,7 @@ function makeOptimisticJob(url) {
 }
 
 function shouldKeepDownloadQueueVisible() {
-  return state.downloadsActive || isDownloadStartupGrace();
+  return state.downloadsActive || isDownloadStartupGrace() || state.jobs.some((item) => item.failed || item.status === "error");
 }
 
 function isDownloadStartupGrace() {
@@ -1153,6 +1153,7 @@ function playlistRow(item, index) {
       <div class="row-title">
         <strong>${h(cleanTrackTitle(item.title || (item.optimistic ? "Reading playlist link" : `Track ${index + 1}`)))}</strong>
         <span style="color:${active ? "#fb5aa6" : "var(--muted)"}">${h(label)}</span>
+        ${label === "Failed" ? `<span style="color:#ff5b88">${h(item.message || "Download failed")}</span>` : ""}
         <div class="progress-track ${active && !progress ? "indeterminate" : ""}"><span style="width:${progress || (active ? 34 : 0)}%"></span></div>
       </div>
       <span>${progress ? `${progress}%` : icon("dots-three-vertical")}</span>
@@ -1534,7 +1535,7 @@ async function pollEvents() {
   if (terminalDownload) {
     state.downloadsActive = false;
     state.downloadStartedAt = 0;
-    state.jobs = [];
+    if (!state.jobs.some((item) => item.failed || item.status === "error")) state.jobs = [];
     render();
     refreshAfterDownloadSettles();
     return;
